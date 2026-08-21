@@ -1,6 +1,8 @@
 name: Apply verified learning bounds fix
 
 on:
+  push:
+    branches: [fix/verification-bounds]
   pull_request:
     branches: [audit/comprehensive-hardening]
 
@@ -9,12 +11,12 @@ permissions:
 
 jobs:
   patch-and-verify:
-    if: ${{ github.head_ref == 'fix/verification-bounds' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/fix/verification-bounds') || (github.event_name == 'pull_request' && github.head_ref == 'fix/verification-bounds' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - id: gate
         name: Check one-time trigger
