@@ -1,3 +1,4 @@
+import net from 'node:net';
 import path from 'node:path';
 
 function text(name, fallback = '') {
@@ -19,7 +20,8 @@ function integer(name, fallback, min, max) {
 
 function loopbackHost(hostname) {
   const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  return host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
+  if (host === 'localhost' || host === '::1') return true;
+  return net.isIP(host) === 4 && host.split('.')[0] === '127';
 }
 
 function url(name, fallback, { credentials = false } = {}) {
