@@ -284,6 +284,14 @@ export class LearningService {
           job.updatedAt = nowIso();
         }
       }
+      for (const task of Object.values(state.businessTasks || {})) {
+        const otherPlan = task.payload?.planId && task.payload.planId !== planId;
+        if (task.userId === userId && otherPlan && ['pending', 'claimed'].includes(task.status)) {
+          task.status = 'cancelled';
+          task.cancelledAt = nowIso();
+          task.updatedAt = nowIso();
+        }
+      }
       plan.status = 'approved';
       plan.approvedAt = nowIso();
       plan.updatedAt = nowIso();
@@ -530,6 +538,7 @@ Sources:\n${JSON.stringify(sourcePacket, null, 2)}`,
       const lesson = state.lessons[lessonId];
       if (!lesson || lesson.userId !== userId) throw new Error('Lesson not found');
       if (!['delivered', 'completed'].includes(lesson.status)) throw new Error('Lesson is not available for reading yet');
+      if (lesson.status === 'completed') return lesson;
       lesson.resumePercent = clamp(Number(percent) || 0, 0, 99);
       lesson.updatedAt = nowIso();
       return lesson;
