@@ -182,6 +182,11 @@ verify_start_script_runtime_writes() {
     target="${target%\"}"; target="${target#\"}"
     target="${target%\'}"; target="${target#\'}"
     [[ "$target" == /* ]] || continue
+    # aaPanel's generated start script commonly writes its PID file itself. The
+    # runtime user does not need permission for that final bookkeeping write:
+    # the deployer rewrites the PID file as root only after the listener,
+    # cwd, argv and runtime identity have been independently verified.
+    [[ "$target" == "$AAPANEL_PID_FILE" ]] && continue
     if [[ -e "$target" ]]; then
       runuser -u "$RUNTIME_USER" -- test -w "$target" || return 1
     else
