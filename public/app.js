@@ -38,6 +38,45 @@ function showError(error) {
 
 function clearError() { $('#error').classList.add('hidden'); }
 
+function openDialogSurface(html, { labelId = 'dialog-title', initialFocus = '[autofocus], #close-dialog, button, a[href], input, textarea, select' } = {}) {
+  const dialog = $('#dialog');
+  const previous = document.activeElement;
+  dialog.innerHTML = html;
+  dialog.setAttribute('aria-labelledby', labelId);
+  dialog.classList.remove('hidden');
+  const close = () => {
+    dialog.classList.add('hidden');
+    dialog.innerHTML = '';
+    dialog.removeAttribute('aria-labelledby');
+    dialog.onclick = null;
+    dialog.onkeydown = null;
+    previous?.focus?.();
+  };
+  dialog.onclick = (event) => { if (event.target === dialog) close(); };
+  dialog.onkeydown = (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+    if (event.key === 'Tab') {
+      const focusable = [...dialog.querySelectorAll('button, a[href], input, textarea, select, [tabindex]:not([tabindex="-1"])')]
+        .filter((item) => !item.disabled && !item.hidden && item.getAttribute('aria-hidden') !== 'true');
+      if (!focusable.length) { event.preventDefault(); return; }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  };
+  dialog.querySelector(initialFocus)?.focus();
+  return { dialog, close };
+}
+
+function clampProgress(value) { return Math.max(0, Math.min(100, Number(value) || 0)); }
+function applyDynamicStyles(root = document) {
+  root.querySelectorAll('[data-progress-inline]').forEach((item) => { item.style.inlineSize = `${clampProgress(item.dataset.progressInline)}%`; });
+  root.querySelectorAll('[data-progress-width]').forEach((item) => { item.style.width = `${clampProgress(item.dataset.progressWidth)}%`; });
+}
+const dynamicStyleObserver = new MutationObserver(() => applyDynamicStyles());
+dynamicStyleObserver.observe(document.documentElement, { childList: true, subtree: true });
+
 function showToast(message) {
   const toast = $('#toast');
   toast.textContent = message;
@@ -277,13 +316,10 @@ function reviewCard(kind, item, book = null) {
 }
 
 function openScheduleDialog(kind, id, currentAt = '') {
-  const dialog = $('#dialog');
   const endpoint = kind === 'book' ? '/api/book-sessions' : '/api/lessons';
   const suggested = currentAt ? new Date(currentAt) : new Date(Date.now() + 5 * 60_000);
   const localValue = new Date(suggested.getTime() - suggested.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-  dialog.classList.remove('hidden');
-  dialog.innerHTML = `<div class="card"><div class="dialog-heading"><h2>Choose delivery time</h2><button type="button" class="icon-button ghost" id="close-dialog" aria-label="Close">×</button></div><form id="schedule-form"><label>Delivery date and time<input type="datetime-local" name="runAt" value="${esc(localValue)}" required></label><div class="actions dialog-actions"><button>Save schedule</button><button type="button" class="ghost" id="deliver-immediately">Deliver now</button></div></form></div>`;
-  const close = () => dialog.classList.add('hidden');
+  const { close } = openDialogSurface(`<div class="card"><div class="dialog-heading"><h2 id="dialog-title">Choose delivery time</h2><button type="button" class="icon-button ghost" id="close-dialog" aria-label="Close">×</button></div><form id="schedule-form"><label>Delivery date and time<input type="datetime-local" name="runAt" value="${esc(localValue)}" required></label><div class="actions dialog-actions"><button>Save schedule</button><button type="button" class="ghost" id="deliver-immediately">Deliver now</button></div></form></div>`, { initialFocus: 'input[name="runAt"]' });
   $('#close-dialog').onclick = close;
   $('#schedule-form').onsubmit = async (event) => {
     event.preventDefault();
@@ -451,7 +487,7 @@ function todayLessonCard(lesson, index) {
         <span>${Number(lesson.estimatedMinutes) || 8} ${esc(uiText(lesson, 'minutes'))}</span><span aria-hidden="true">·</span>
         <span>${esc(lessonProgressLabel(lesson))}${lesson.resumePercent > 0 && lesson.status !== 'completed' ? ` · ${Number(lesson.resumePercent)}%` : ''}</span>
       </div>
-      ${lesson.resumePercent > 0 && lesson.status !== 'completed' ? `<div class="lesson-progress-track" role="progressbar" aria-label="Lesson progress" aria-valuenow="${Number(lesson.resumePercent)}" aria-valuemin="0" aria-valuemax="100"><span style="inline-size:${Number(lesson.resumePercent)}%"></span></div>` : ''}
+      ${lesson.resumePercent > 0 && lesson.status !== 'completed' ? `<div class="lesson-progress-track" role="progressbar" aria-label="Lesson progress" aria-valuenow="${Number(lesson.resumePercent)}" aria-valuemin="0" aria-valuemax="100"><span data-progress-inline="${Number(lesson.resumePercent)}"></span></div>` : ''}
       <div class="today-card-actions">
         <button class="open-lesson-cover" data-id="${lesson.id}">${esc(started ? uiText(lesson, 'continueLesson') : uiText(lesson, 'start'))}</button>
         <button class="ghost toggle-lesson-details" data-id="${lesson.id}" aria-expanded="${expanded}" aria-controls="${detailsId}">${esc(expanded ? uiText(lesson, 'hideDetails') : uiText(lesson, 'details'))}</button>
@@ -728,7 +764,7 @@ function renderLessonReader(lesson) {
     </header>
     <div class="reader-progress" aria-label="Lesson progress">
       <div><span>${esc(uiText(lesson, 'section'))} ${readerState.activeIndex + 1} / ${sections.length}</span><span>${remaining} ${esc(uiText(lesson, 'minutes'))} ${esc(uiText(lesson, 'remaining'))}</span></div>
-      <div class="reader-progress-track" role="progressbar" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><span style="inline-size:${progress}%"></span></div>
+      <div class="reader-progress-track" role="progressbar" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><span data-progress-inline="${progress}"></span></div>
     </div>
     <div class="reader-column">
       <article class="reader-section" data-section-id="${active.id}" aria-labelledby="active-section-title">
@@ -753,29 +789,9 @@ function renderLessonReader(lesson) {
 }
 
 function openAccessibleSheet(title, body, bind = () => {}) {
-  const dialog = $('#dialog');
-  const previous = document.activeElement;
-  dialog.classList.remove('hidden');
-  dialog.innerHTML = `<div class="card lesson-sheet" role="document"><div class="dialog-heading"><h2>${esc(title)}</h2><button type="button" class="icon-button ghost" id="close-dialog" aria-label="Close">×</button></div>${body}</div>`;
-  const close = () => {
-    dialog.classList.add('hidden');
-    dialog.innerHTML = '';
-    previous?.focus?.();
-  };
+  const { dialog, close } = openDialogSurface(`<div class="card lesson-sheet" role="document"><div class="dialog-heading"><h2 id="dialog-title">${esc(title)}</h2><button type="button" class="icon-button ghost" id="close-dialog" aria-label="Close">×</button></div>${body}</div>`);
   $('#close-dialog').onclick = close;
-  dialog.onclick = (event) => { if (event.target === dialog) close(); };
-  dialog.onkeydown = (event) => {
-    if (event.key === 'Escape') close();
-    if (event.key === 'Tab') {
-      const focusable = [...dialog.querySelectorAll('button, a[href], input, textarea, select')].filter((item) => !item.disabled);
-      if (!focusable.length) return;
-      const first = focusable[0]; const last = focusable.at(-1);
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-    }
-  };
   bind(dialog, close);
-  $('#close-dialog').focus();
 }
 
 function openOutlineSheet(lesson, sections) {
@@ -1028,10 +1044,7 @@ function bindFeedback(lesson) {
 }
 
 function openQuestionDialog(lesson, starter = '') {
-  const dialog = $('#dialog');
-  dialog.classList.remove('hidden');
-  dialog.innerHTML = `<div class="card"><div class="dialog-heading"><h2>${esc(uiText(lesson, 'discussTitle'))}</h2><button type="button" class="icon-button ghost" id="close-dialog" aria-label="Close">×</button></div><form id="question-form"><label>${esc(uiText(lesson, 'questionLabel'))}<textarea name="question" dir="auto" required autofocus>${esc(starter)}</textarea></label><p class="muted">${esc(uiText(lesson, 'aiProcessing'))}</p><div class="actions dialog-actions"><button>${esc(uiText(lesson, 'ask'))}</button><button type="button" class="ghost" id="cancel-dialog">${esc(uiText(lesson, 'cancel'))}</button></div></form><div id="question-answer"></div></div>`;
-  const close = () => dialog.classList.add('hidden');
+  const { close } = openDialogSurface(`<div class="card"><div class="dialog-heading"><h2 id="dialog-title">${esc(uiText(lesson, 'discussTitle'))}</h2><button type="button" class="icon-button ghost" id="close-dialog" aria-label="Close">×</button></div><form id="question-form"><label>${esc(uiText(lesson, 'questionLabel'))}<textarea name="question" dir="auto" required autofocus>${esc(starter)}</textarea></label><p class="muted">${esc(uiText(lesson, 'aiProcessing'))}</p><div class="actions dialog-actions"><button>${esc(uiText(lesson, 'ask'))}</button><button type="button" class="ghost" id="cancel-dialog">${esc(uiText(lesson, 'cancel'))}</button></div></form><div id="question-answer"></div></div>`, { initialFocus: 'textarea[name="question"]' });
   $('#close-dialog').onclick = close;
   $('#cancel-dialog').onclick = close;
   $('#question-form').onsubmit = async (event) => {
@@ -1166,7 +1179,7 @@ function bookDetailHtml(detail) {
   const conceptsHtml = book.concepts?.length ? `<div class="card"><div class="section-heading"><div><div class="kicker">Knowledge extracted</div><h2>Book concepts</h2></div><span class="badge">${book.concepts.length}</span></div><div class="list">${book.concepts.map((concept) => `<div class="list-item"><div class="lesson-meta"><strong dir="auto">${esc(concept.name)}</strong><span class="badge ${concept.mastery === 'retained' ? 'good' : ''}">${esc(concept.mastery || 'introduced')}</span></div><p dir="auto">${esc(concept.explanation || '')}</p>${concept.topicConnection ? `<small dir="auto">Possible topic connection: ${esc(concept.topicConnection)}</small>` : ''}</div>`).join('')}</div></div>` : '';
   const pendingLinks = (book.topicLinkSuggestions || []).filter((link) => link.status === 'pending');
   const topicLinksHtml = (book.topicLinkSuggestions || []).length ? `<div class="card"><div class="section-heading"><div><div class="kicker">Cross-disciplinary learning</div><h2>Topic connections</h2></div><span class="badge">${pendingLinks.length} pending</span></div><div class="list">${book.topicLinkSuggestions.map((link) => `<div class="list-item"><div class="lesson-meta"><strong dir="auto">${esc(link.concept)} → ${esc(link.topic)}</strong><span class="badge ${link.status === 'approved' ? 'good' : link.status === 'rejected' ? 'bad' : 'warn'}">${esc(link.status)}</span></div><p dir="auto">${esc(link.reason || '')}</p>${link.status === 'pending' ? `<div class="actions"><button class="secondary book-link-review" data-id="${link.id}" data-decision="approve">Approve link</button><button class="ghost book-link-review" data-id="${link.id}" data-decision="reject">Reject</button></div>` : ''}</div>`).join('')}</div></div>` : '';
-  return `<div class="card book-card"><div class="book-card-header">${bookCover(book)}<div><div class="lesson-meta"><span class="badge ${book.status === 'active' || book.status === 'completed' ? 'good' : book.status === 'source_required' ? 'warn' : ''}">${esc(bookStatusLabel(book.status))}</span><span class="badge">Sources: ${esc(book.sourceQuality || 'pending')}</span><span class="muted">${Number(book.progressPercent || 0)}%</span></div><h1 dir="auto">${esc(book.title)}</h1><p class="muted" dir="auto">${esc(book.author || '')}${book.edition ? ` · ${esc(book.edition)}` : ''}</p><div class="progress-track"><div class="progress-fill" style="width:${Number(book.progressPercent || 0)}%"></div></div></div></div>${book.description ? `<p dir="auto">${esc(book.description)}</p>` : ''}${sourceWarning}
+  return `<div class="card book-card"><div class="book-card-header">${bookCover(book)}<div><div class="lesson-meta"><span class="badge ${book.status === 'active' || book.status === 'completed' ? 'good' : book.status === 'source_required' ? 'warn' : ''}">${esc(bookStatusLabel(book.status))}</span><span class="badge">Sources: ${esc(book.sourceQuality || 'pending')}</span><span class="muted">${Number(book.progressPercent || 0)}%</span></div><h1 dir="auto">${esc(book.title)}</h1><p class="muted" dir="auto">${esc(book.author || '')}${book.edition ? ` · ${esc(book.edition)}` : ''}</p><div class="progress-track"><div class="progress-fill" data-progress-width="${Number(book.progressPercent || 0)}"></div></div></div></div>${book.description ? `<p dir="auto">${esc(book.description)}</p>` : ''}${sourceWarning}
     <div class="book-controls">
       ${book.status === 'active' ? '<button class="secondary book-control" data-action="pause">Pause</button>' : ''}
       ${book.status === 'paused' ? '<button class="secondary book-control" data-action="resume">Resume</button>' : ''}
@@ -1190,7 +1203,7 @@ function renderBooks() {
   const selected = selectedId ? state.bookDetails[selectedId] : null;
   el.innerHTML = `<div class="card"><div class="section-heading"><div><div class="kicker">Separate learning track</div><h2>Add a book</h2></div><span class="badge">Up to 3 active</span></div><p>Enter a title and author, ISBN, or a public catalogue/publisher URL. You may also attach your legally obtained PDF or ebook now, or add it later from the book page.</p><form id="add-book-form" class="form-grid"><label>Title<input name="title" dir="auto" placeholder="How to Win Friends and Influence People"></label><label>Author<input name="author" dir="auto" placeholder="Dale Carnegie"></label><label>ISBN<input name="isbn" inputmode="numeric"></label><label>Book or catalogue URL<input name="url" type="url" placeholder="https://..."></label><label>Edition language<select name="language"><option value="${esc(state.me.language)}">Profile language (${esc(state.me.language)})</option><option value="en">English</option><option value="ar">Arabic</option><option value="nl">Dutch</option></select></label><label class="full">Owned book file (optional)<input name="file" type="file" accept=".pdf,.epub,.txt,.md,application/pdf,application/epub+zip,text/plain,text/markdown"></label><div class="full"><button>Add and analyze book</button></div></form></div>
     ${selected ? bookDetailHtml(selected) : ''}
-    <div class="card"><div class="section-heading"><div><div class="kicker">Your collection</div><h2>Books</h2></div><span class="badge">${state.books.length}</span></div>${state.books.length ? `<div class="book-grid">${state.books.map((book) => `<button class="list-item ghost book-open" data-id="${book.id}"><div class="book-card-header">${bookCover(book)}<div><div class="lesson-meta"><span class="badge ${book.status === 'source_required' ? 'warn' : ''}">${esc(bookStatusLabel(book.status))}</span><span class="muted">${Number(book.progressPercent || 0)}%</span></div><h3 dir="auto">${esc(book.title)}</h3><p class="muted" dir="auto">${esc(book.author || '')}</p><div class="progress-track"><div class="progress-fill" style="width:${Number(book.progressPercent || 0)}%"></div></div></div></div></button>`).join('')}</div>` : '<div class="empty-state compact"><p class="muted">No books added yet.</p></div>'}</div>`;
+    <div class="card"><div class="section-heading"><div><div class="kicker">Your collection</div><h2>Books</h2></div><span class="badge">${state.books.length}</span></div>${state.books.length ? `<div class="book-grid">${state.books.map((book) => `<button class="list-item ghost book-open" data-id="${book.id}"><div class="book-card-header">${bookCover(book)}<div><div class="lesson-meta"><span class="badge ${book.status === 'source_required' ? 'warn' : ''}">${esc(bookStatusLabel(book.status))}</span><span class="muted">${Number(book.progressPercent || 0)}%</span></div><h3 dir="auto">${esc(book.title)}</h3><p class="muted" dir="auto">${esc(book.author || '')}</p><div class="progress-track"><div class="progress-fill" data-progress-width="${Number(book.progressPercent || 0)}"></div></div></div></div></button>`).join('')}</div>` : '<div class="empty-state compact"><p class="muted">No books added yet.</p></div>'}</div>`;
   bindBookActions(selected);
 }
 
@@ -1267,9 +1280,8 @@ function bindBookSessionActions(found) {
   if ($('#back-to-book')) $('#back-to-book').onclick = () => { location.hash = `book=${book.id}`; renderBooks(); };
   if ($('#bookmark-book-session')) $('#bookmark-book-session').onclick = async () => { await api(`/api/books/${book.id}/bookmarks`, { method: 'POST', body: JSON.stringify({ sessionId: session.id, label: `${session.sessionNumber}. ${session.title}` }) }); await refreshData(); showToast('Session bookmarked.'); };
   if ($('#ask-book-question')) $('#ask-book-question').onclick = () => {
-    const dialog = $('#dialog'); dialog.classList.remove('hidden');
-    dialog.innerHTML = `<div class="card"><div class="dialog-heading"><h2>Ask about this book session</h2><button type="button" class="icon-button ghost" id="close-dialog">×</button></div><form id="book-question-form"><label>Question<textarea name="question" dir="auto" required autofocus></textarea></label><div class="actions dialog-actions"><button>Ask</button></div></form><div id="book-question-answer"></div></div>`;
-    $('#close-dialog').onclick = () => dialog.classList.add('hidden');
+    const { close } = openDialogSurface(`<div class="card"><div class="dialog-heading"><h2 id="dialog-title">Ask about this book session</h2><button type="button" class="icon-button ghost" id="close-dialog" aria-label="Close">×</button></div><form id="book-question-form"><label>Question<textarea name="question" dir="auto" required autofocus></textarea></label><div class="actions dialog-actions"><button>Ask</button></div></form><div id="book-question-answer"></div></div>`, { initialFocus: 'textarea[name="question"]' });
+    $('#close-dialog').onclick = close;
     $('#book-question-form').onsubmit = async (event) => { event.preventDefault(); const result = await api(`/api/book-sessions/${session.id}/follow-up`, { method: 'POST', body: JSON.stringify({ question: new FormData(event.target).get('question') }) }); $('#book-question-answer').innerHTML = `<div class="notice dialog-result" dir="auto">${esc(result.answer)}</div>`; };
   };
   if ($('#book-feedback-form')) $('#book-feedback-form').onsubmit = async (event) => { event.preventDefault(); const form = new FormData(event.target); await api(`/api/book-sessions/${session.id}/feedback`, { method: 'POST', body: JSON.stringify({ useful: form.get('useful') === 'true', depth: form.get('depth'), comment: form.get('comment') }) }); await refreshData(); renderBooks(); showToast('Book feedback saved.'); };
@@ -1288,7 +1300,7 @@ function renderProgress() {
   $('#tab-progress').innerHTML = `<div class="grid three metrics-grid"><div class="card metric-card"><div class="metric">${progress.completed}</div><div class="metric-label">Completed topic lessons</div></div><div class="card metric-card"><div class="metric">${progress.completionRate}%</div><div class="metric-label">Topic completion rate</div></div><div class="card metric-card"><div class="metric">${progress.activeMinutes}</div><div class="metric-label">Topic learning minutes</div></div></div>
   <div class="grid three metrics-grid"><div class="card metric-card"><div class="metric">${books.activeBooks || 0}</div><div class="metric-label">Active books</div></div><div class="card metric-card"><div class="metric">${books.completedSessions || 0}</div><div class="metric-label">Completed book sessions</div></div><div class="card metric-card"><div class="metric">${books.completedBooks || 0}</div><div class="metric-label">Completed books</div></div></div>
   <div class="card"><h2>Topics</h2>${Object.keys(progress.byTopic).length ? `<div class="list">${Object.entries(progress.byTopic).map(([topic, item]) => `<div class="list-item"><strong dir="auto">${esc(topic)}</strong><div class="muted">${item.completed} completed · ${item.retainedSignals} retained signals</div></div>`).join('')}</div>` : '<div class="empty-state compact"><p class="muted">Topic progress appears after lessons are completed.</p></div>'}</div>
-  <div class="card"><h2>Book progress</h2>${state.books.length ? `<div class="list">${state.books.map((book) => `<button class="list-item ghost book-open" data-id="${book.id}"><strong dir="auto">${esc(book.title)}</strong><div class="progress-track"><div class="progress-fill" style="width:${Number(book.progressPercent || 0)}%"></div></div><div class="muted">${Number(book.progressPercent || 0)}% · ${esc(book.status)}</div></button>`).join('')}</div>` : '<div class="empty-state compact"><p class="muted">Add a book to begin the separate book-learning track.</p></div>'}</div>`;
+  <div class="card"><h2>Book progress</h2>${state.books.length ? `<div class="list">${state.books.map((book) => `<button class="list-item ghost book-open" data-id="${book.id}"><strong dir="auto">${esc(book.title)}</strong><div class="progress-track"><div class="progress-fill" data-progress-width="${Number(book.progressPercent || 0)}"></div></div><div class="muted">${Number(book.progressPercent || 0)}% · ${esc(book.status)}</div></button>`).join('')}</div>` : '<div class="empty-state compact"><p class="muted">Add a book to begin the separate book-learning track.</p></div>'}</div>`;
   document.querySelectorAll('#tab-progress .book-open').forEach((button) => button.onclick = () => { location.hash = `book=${button.dataset.id}`; switchTab('books'); renderBooks(); });
 }
 
