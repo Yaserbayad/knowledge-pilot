@@ -1,69 +1,51 @@
-# Start or upgrade Knowledge Pilot 1.4.1
+# Start here — Knowledge Pilot deployment and operations
 
-Version 1.4.1 keeps the guided topic-lesson experience and lets learners attach or replace a private book PDF or ebook at any time. Active reading progress is preserved, while books waiting for source analysis are automatically re-queued. Existing `.env`, users, private links, Telegram links, plans, lessons, books, sessions, progress, and uploaded files are preserved. State remains on schema version 5.
+Knowledge Pilot is deployed from immutable GitHub releases. The live aaPanel directory is runtime state, not the source of code authority.
 
-## Safe upgrade
+## For a new release or upgrade
 
-1. Identify the exact process that serves Knowledge Pilot. Do not assume the current shell user’s PM2 registry owns it.
-2. Back up `.env` and the complete `data/` directory.
-3. Stop only the confirmed Knowledge Pilot process.
-4. Replace application files while preserving `.env` and `data/`.
-5. Install dependencies, validate, and restart the same process manager.
+Use the canonical [aaPanel immutable-release runbook](docs/AAPANEL_DEPLOYMENT.md).
+
+The safe sequence is:
+
+1. Identify the exact process and process manager currently serving `/www/wwwroot/knowledgepilot` on `127.0.0.1:3100`.
+2. Resolve the published release tag to its exact expected commit SHA.
+3. Build a clean staging tree from that immutable commit.
+4. Preserve `.env` without displaying it and validate against isolated staging data.
+5. Run locked installs, configuration verification, the full root test suite, the Workspace Agent suite, and both production dependency audits.
+6. Create a rollback code snapshot.
+7. Stop only the confirmed Knowledge Pilot process.
+8. Replace release-owned files while preserving only `.env`, `data/`, and server-owned `.well-known/` material.
+9. Restart through the same process manager.
+10. Verify local/external health, release identity, learner/admin flows, verified-processing behavior, and configured delivery channels.
+11. If the Workspace Agent bridge is used, validate it end to end before enabling its automatic timer.
+12. Roll back immediately if the release cannot pass smoke verification.
+
+Never deploy from `main`/`latest`, never preserve an old `automation/` directory across releases, and never start a second process manager because the current shell's PM2 view is empty.
+
+## Preparing an already-staged release
+
+The repository-owned aaPanel preparation command is deliberately fail-closed and does **not** start or modify a process manager:
 
 ```bash
-cd /www/wwwroot/knowledgepilot
-cp .env /tmp/knowledgepilot.env.$(date +%s)
-tar -czf /tmp/knowledgepilot-data-$(date +%F-%H%M%S).tar.gz data
+cd /www/wwwroot/knowledgepilot.stage
+DATA_DIR=./data WHATSAPP_AUTH_DIR=./data/whatsapp-auth \
+  bash scripts/install-aapanel.sh /www/wwwroot/knowledgepilot.stage
+npm audit --omit=dev --audit-level=high
 ```
 
-Copy the package from a temporary directory:
+Validate the Workspace Agent separately:
 
 ```bash
-rsync -a --delete \
-  --exclude='.env' \
-  --exclude='data/' \
-  --exclude='node_modules/' \
-  /tmp/knowledgepilot-1.4.1/ /www/wwwroot/knowledgepilot/
-```
-
-Then:
-
-```bash
-cd /www/wwwroot/knowledgepilot
-npm install --omit=dev
-node scripts/verify-config.js
+cd /www/wwwroot/knowledgepilot.stage/automation/workspace-agent
+npm ci --ignore-scripts
 npm run check
+npm audit --omit=dev --audit-level=high
+npm ci --omit=dev --ignore-scripts
 ```
 
-Set ownership to the actual runtime user, for example:
+If any command fails, do not touch the live process.
 
-```bash
-chown -R www:www /www/wwwroot/knowledgepilot
-chmod 600 .env
-find data -type d -exec chmod 750 {} \;
-find data -type f -exec chmod 640 {} \;
-```
+## Historical upgrade notes
 
-Restart through the same aaPanel, systemd, or PM2 service that owned the process before the upgrade.
-
-## Verify
-
-```bash
-curl -fsS https://YOUR_DOMAIN/health
-curl -fsS https://YOUR_DOMAIN/gpt-action/openapi.json | grep '1.4.1'
-```
-
-Reimport the GPT Action schema and replace the custom GPT instructions with `docs/CUSTOM_GPT_INSTRUCTIONS.md`.
-
-## Smoke test
-
-1. Open an existing private learner link.
-2. Confirm the learner settings show automatic scheduling enabled.
-3. Approve a weekly plan or book plan.
-4. Process the resulting custom-GPT task.
-5. Confirm validated content schedules automatically.
-6. Confirm held content appears in the learner dashboard with **Accept and schedule**, **Request changes**, and **Skip**.
-7. Confirm Telegram receives either the content or an action-required notice.
-8. Confirm Admin is not needed for the normal lifecycle.
-
-See [UPGRADE-1.4.1.md](UPGRADE-1.4.1.md) for the current deployment and rollback procedure.
+Version-specific upgrade files document what changed in those releases; they are not the current deployment authority. In particular, [UPGRADE-1.4.1.md](UPGRADE-1.4.1.md) is retained only as historical release context.

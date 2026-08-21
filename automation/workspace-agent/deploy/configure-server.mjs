@@ -15,6 +15,10 @@ const nginxFile = '/www/server/panel/vhost/nginx/node_knowledgepilot.conf';
 const systemdDir = '/etc/systemd/system';
 const markerStart = '    # KNOWLEDGEPILOT-WORKSPACE-AGENT-MCP-START';
 const markerEnd = '    # KNOWLEDGEPILOT-WORKSPACE-AGENT-MCP-END';
+const nodeBinary = process.execPath;
+if (!path.isAbsolute(nodeBinary) || /[\s"'\\\0]/.test(nodeBinary)) {
+  throw new Error('Running Node binary path cannot be safely rendered into systemd units');
+}
 
 function parseEnv(input) {
   const values = {};
@@ -114,7 +118,15 @@ for (const unit of [
 ]) {
   const source = path.join(bridgeRoot, 'deploy', unit);
   const target = path.join(systemdDir, unit);
-  await atomicWrite(target, await fs.readFile(source, 'utf8'), 0o644, { uid: 0, gid: 0 });
+  const template = await fs.readFile(source, 'utf8');
+  let content = template;
+  if (unit.endsWith('.service')) {
+    if (!template.includes('__NODE_BINARY__')) {
+      throw new Error(`Systemd unit template ${unit} is missing the Node binary placeholder`);
+    }
+    content = template.replaceAll('__NODE_BINARY__', nodeBinary);
+  }
+  await atomicWrite(target, content, 0o644, { uid: 0, gid: 0 });
 }
 
 const nginxBlock = `${markerStart}

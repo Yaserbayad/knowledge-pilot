@@ -532,6 +532,12 @@ pre.code { white-space: pre-wrap; word-break: break-word; background: var(--code
 .dialog .card { width: min(620px, 100%); max-height: min(90vh, 760px); overflow: auto; box-shadow: var(--shadow); }
 .dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .dialog-actions, .dialog-result { margin-block-start: 14px; }
+.admin-proposal-row { padding: .65rem 0; border-block-start: 1px solid var(--line); }
+.admin-row-actions { margin-block-start: 6px; }
+.admin-dialog-actions, .admin-spaced-list, .admin-form-submit { margin-block-start: 12px; }
+.admin-item-actions { margin-block-start: 10px; }
+.admin-spaced-notice { margin-block-start: 14px; }
+.admin-compact-notice { margin-block-start: 8px; }
 .icon-button { width: 44px; min-width: 44px; padding: 0; font-size: 1.5rem; }
 .empty-state { text-align: center; padding-block: 34px; }
 .empty-state.compact { padding-block: 18px; }

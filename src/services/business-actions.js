@@ -12,6 +12,14 @@ const TASK_TYPES = new Set([
   'book_analysis', 'book_session', 'book_finale', 'book_follow_up', 'book_reinforcement_evaluation'
 ]);
 
+function clean(value, max = 1000) {
+  return String(value || '').trim().slice(0, max);
+}
+
+function cleanList(value, max = 20, itemMax = 1000) {
+  return Array.isArray(value) ? value.map((item) => clean(item, itemMax)).filter(Boolean).slice(0, max) : [];
+}
+
 function safeUser(user) {
   return {
     id: user.id, name: user.name, language: user.language, timezone: user.timezone,
@@ -33,14 +41,94 @@ function assertActiveTaskContext(state, task) {
   return activeTask;
 }
 
+function completeActiveTask(state, task, resultRef, { submissionDiagnostics = null } = {}) {
+  const target = assertActiveTaskContext(state, task);
+  target.status = 'completed';
+  target.completedAt = nowIso();
+  target.claimedAt ||= nowIso();
+  target.resultRef = resultRef || null;
+  target.error = null;
+  target.lastSubmissionError = null;
+  target.acceptedSubmission = submissionDiagnostics ? { ...submissionDiagnostics, acceptedAt: nowIso() } : null;
+  delete target.acceptedResult;
+  target.updatedAt = nowIso();
+  return target;
+}
+
+function cleanHttpsUrl(value, label = 'Source URL') {
+  const text = clean(value, 2000);
+  if (!text) throw new Error(`${label} is required`);
+  let parsed;
+  try { parsed = new URL(text); } catch { throw new Error(`${label} must be a valid HTTPS URL`); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error(`${label} must use direct HTTPS without embedded credentials`);
+  return parsed.toString();
+}
+
 function cleanSourceSubmissions(result, max = 20) {
   const submitted = Array.isArray(result?.sources) ? result.sources.slice(0, max) : [];
-  const ids = submitted.map((source) => String(source.id || ''));
-  const urls = submitted.map((source) => String(source.url || ''));
+  const normalized = submitted.map((source, index) => ({
+    id: clean(source?.id, 120),
+    title: clean(source?.title || source?.url || `Source ${index + 1}`, 400),
+    url: cleanHttpsUrl(source?.url, 'Source URL'),
+    sourceType: clean(source?.sourceType, 80),
+    claimsSupported: cleanList(source?.claimsSupported, 20, 300)
+  }));
+  const ids = normalized.map((source) => source.id);
+  const urls = normalized.map((source) => source.url);
   if (new Set(ids).size !== ids.length || ids.some((id) => !id)) throw new Error('Source IDs must be non-empty and unique');
   if (new Set(urls).size !== urls.length) throw new Error('Source URLs must be unique');
-  if (urls.some((url) => !/^https:\/\//.test(url))) throw new Error('All external source URLs must use direct HTTPS links');
-  return submitted;
+  return normalized;
+}
+
+function cleanFollowUpSourceUrls(value) {
+  const urls = Array.isArray(value) ? value.slice(0, 8).map((url) => cleanHttpsUrl(url, 'Follow-up source URL')) : [];
+  if (new Set(urls).size !== urls.length) throw new Error('Follow-up source URLs must be unique');
+  return urls;
+}
+
+function queueDirectResponse(state, userId, text, origin, interactionId) {
+  if (!state.users?.[userId]) throw new Error('Task user no longer exists');
+  const existing = Object.values(state.jobs || {}).find((job) => job.type === 'send_direct_response' && job.payload?.interactionId === interactionId && ['pending', 'running'].includes(job.status));
+  if (existing) return existing;
+  const job = {
+    id: uid('job'), type: 'send_direct_response', userId,
+    payload: { text: clean(text, 12000), origin: clean(origin, 40), interactionId },
+    runAt: nowIso(), status: 'pending', attempts: 0, lastError: null, createdAt: nowIso(), updatedAt: nowIso()
+  };
+  state.jobs[job.id] = job;
+  return job;
+}
+
+function scheduleAcceptedLesson(state, lesson, runAt) {
+  const parsed = new Date(runAt);
+  if (Number.isNaN(parsed.getTime())) throw new Error('Invalid lesson schedule time');
+  const running = Object.values(state.jobs || {}).find((job) => job.type === 'deliver_lesson' && job.payload?.lessonId === lesson.id && job.status === 'running');
+  if (running) throw new Error('Lesson delivery is already in progress');
+  lesson.status = 'scheduled';
+  lesson.scheduledAt = parsed.toISOString();
+  lesson.updatedAt = nowIso();
+  const job = {
+    id: uid('job'), type: 'deliver_lesson', userId: lesson.userId, payload: { lessonId: lesson.id },
+    runAt: lesson.scheduledAt, status: 'pending', attempts: 0, lastError: null, createdAt: nowIso(), updatedAt: nowIso()
+  };
+  state.jobs[job.id] = job;
+  return job;
+}
+
+function scheduleAcceptedBookSession(state, session, runAt) {
+  const parsed = new Date(runAt);
+  if (Number.isNaN(parsed.getTime())) throw new Error('Invalid book-session schedule time');
+  const running = Object.values(state.jobs || {}).find((job) => job.type === 'deliver_book_session' && job.payload?.sessionId === session.id && job.status === 'running');
+  if (running) throw new Error('Book-session delivery is already in progress');
+  session.status = 'scheduled';
+  session.scheduledAt = parsed.toISOString();
+  session.updatedAt = nowIso();
+  const job = {
+    id: uid('job'), type: 'deliver_book_session', userId: session.userId, payload: { sessionId: session.id },
+    runAt: session.scheduledAt, status: 'pending', attempts: 0, lastError: null, createdAt: nowIso(), updatedAt: nowIso()
+  };
+  state.jobs[job.id] = job;
+  return job;
 }
 
 function businessAuditIssues(result, { minimumSources = 2 } = {}) {
@@ -338,22 +426,6 @@ export class BusinessActionsService {
       else if (task.type === 'book_session' || task.type === 'book_finale') output = await this.#submitBookSession(task, preparedResult);
       else throw new Error(`Unsupported task type: ${task.type}`);
 
-      await this.store.transaction((state) => {
-        const target = assertActiveTaskContext(state, task);
-        target.status = 'completed';
-        target.completedAt = nowIso();
-        target.claimedAt ||= nowIso();
-        target.resultRef = output?.id || output?.lesson?.id || output?.plan?.id || output?.book?.id || output?.session?.id || null;
-        target.error = null;
-        target.lastSubmissionError = null;
-        target.acceptedSubmission = submissionDiagnostics ? {
-          ...submissionDiagnostics,
-          acceptedAt: nowIso()
-        } : null;
-        if (task.type === 'book_analysis') target.acceptedResult = preparedResult;
-        target.updatedAt = nowIso();
-        return target;
-      });
       return submissionDiagnostics ? { ...output, submission: { accepted: true, ...submissionDiagnostics } } : output;
     } catch (error) {
       await this.#recordSubmissionRejection(taskId, error);
@@ -374,15 +446,15 @@ export class BusinessActionsService {
 
   async #recordSubmissionRejection(taskId, error) {
     const retryable = error?.retryable !== false;
-    const details = Array.isArray(error?.details) ? error.details.slice(0, 30).map(String) : [];
+    const details = Array.isArray(error?.details) ? error.details.slice(0, 30).map((value) => clean(value, 1000)) : [];
     const diagnostics = error?.diagnostics && typeof error.diagnostics === 'object' ? error.diagnostics : {};
     await this.store.transaction((state) => {
       const task = state.businessTasks?.[taskId];
-      if (!task) return null;
+      if (!task || task.status === 'completed') return task || null;
       task.submissionRejectCount = Number(task.submissionRejectCount || 0) + 1;
       task.lastSubmissionError = {
-        code: error?.code || 'SUBMISSION_REJECTED',
-        message: String(error?.message || 'Submission rejected').slice(0, 2000),
+        code: clean(error?.code || 'SUBMISSION_REJECTED', 120),
+        message: clean(error?.message || 'Submission rejected', 2000),
         details,
         diagnostics,
         retryable,
@@ -427,7 +499,7 @@ export class BusinessActionsService {
     return this.store.transaction((state) => {
       const task = state.businessTasks?.[taskId];
       if (!task) throw new Error('Business task not found');
-      const message = String(reason || 'Unspecified failure').slice(0, 2000);
+      const message = clean(reason || 'Unspecified failure', 2000);
       const integrationFailure = task.type === 'book_analysis'
         && /contract|schema|parsing|integration|server[- ]side result|result[- ]contract/i.test(message);
 
@@ -511,6 +583,7 @@ export class BusinessActionsService {
           metadata: { planId: plan.id }
         });
       }
+      completeActiveTask(state, task, plan.id);
       return plan;
     });
     return { kind: 'weekly_plan', plan };
@@ -521,7 +594,7 @@ export class BusinessActionsService {
     const proposal = snapshot.plan?.proposals?.find((item) => item.id === task.payload.proposalId);
     if (!snapshot.user || !snapshot.plan || !proposal) throw new Error('Task lesson context no longer exists');
     const submittedSources = cleanSourceSubmissions(result, 12);
-    const fetchedSources = await this.research.fetchUrls(submittedSources.map((source) => ({ id: String(source.id), title: String(source.title || source.url), url: String(source.url), sourceType: String(source.sourceType || ''), claimsSupported: Array.isArray(source.claimsSupported) ? source.claimsSupported.map(String) : [] })));
+    const fetchedSources = await this.research.fetchUrls(submittedSources);
     const normalized = normalizeLesson(result, proposal, fetchedSources, snapshot.user);
     const existing = task.payload.revisionOf
       ? snapshot.lessons[task.payload.revisionOf]
@@ -539,46 +612,47 @@ export class BusinessActionsService {
       await this.store.transaction((state) => {
         assertActiveTaskContext(state, task);
         if (!state.plans?.[snapshot.plan.id]) throw new Error('Task lesson context no longer exists');
+        const running = Object.values(state.jobs || {}).find((job) => job.type === 'deliver_lesson' && job.payload?.lessonId === lesson.id && job.status === 'running');
+        if (running) throw new Error('Lesson delivery is already in progress');
         state.lessons[lesson.id] = lesson;
-      for (const job of Object.values(state.jobs || {})) {
-        if (job.type === 'deliver_lesson' && job.payload?.lessonId === lesson.id && job.status === 'pending') {
-          job.status = 'cancelled';
-          job.cancelledAt = nowIso();
-          job.updatedAt = nowIso();
+        for (const job of Object.values(state.jobs || {})) {
+          if (job.type === 'deliver_lesson' && job.payload?.lessonId === lesson.id && job.status === 'pending') {
+            job.status = 'cancelled';
+            job.cancelledAt = nowIso();
+            job.updatedAt = nowIso();
+          }
         }
-      }
-      if (snapshot.user.automation?.notifyActionRequired !== false && lesson.reviewStatus === 'needs_review') {
-        queueSystemNotice(state, {
-          userId: lesson.userId,
-          kind: 'lesson_review_required',
-          title: 'Lesson needs your review',
-          message: `“${lesson.title}” is ready, but automated validation found ${lesson.quality.issues.length} item(s) that require your decision.`,
-          actionUrl: `${this.learning.accessUrl(snapshot.user)}#lesson=${lesson.id}`,
-          actionLabel: 'Review lesson',
-          dedupeKey: `lesson-review:${lesson.id}:r${lesson.revisionNumber || 0}`,
-          metadata: { lessonId: lesson.id, issues: lesson.quality.issues }
-        });
-      }
+        if (snapshot.user.automation?.notifyActionRequired !== false && lesson.reviewStatus === 'needs_review') {
+          queueSystemNotice(state, {
+            userId: lesson.userId,
+            kind: 'lesson_review_required',
+            title: 'Lesson needs your review',
+            message: `“${lesson.title}” is ready, but automated validation found ${lesson.quality.issues.length} item(s) that require your decision.`,
+            actionUrl: `${this.learning.accessUrl(snapshot.user)}#lesson=${lesson.id}`,
+            actionLabel: 'Review lesson',
+            dedupeKey: `lesson-review:${lesson.id}:r${lesson.revisionNumber || 0}`,
+            metadata: { lessonId: lesson.id, issues: lesson.quality.issues }
+          });
+        } else if (lesson.reviewStatus === 'approved' && this.#autoScheduleFor(snapshot.user)) {
+          scheduleAcceptedLesson(state, lesson, this.#automaticRunAt(snapshot.user));
+        } else if (lesson.reviewStatus === 'approved' && snapshot.user.automation?.notifyActionRequired !== false) {
+          queueSystemNotice(state, {
+            userId: lesson.userId,
+            kind: 'lesson_ready_to_schedule',
+            title: 'Lesson ready to schedule',
+            message: `“${lesson.title}” passed validation and is waiting for your delivery decision.`,
+            actionUrl: `${this.learning.accessUrl(snapshot.user)}#lesson=${lesson.id}`,
+            actionLabel: 'Open lesson',
+            dedupeKey: `lesson-ready-unscheduled:${lesson.id}:r${lesson.revisionNumber || 0}`,
+            metadata: { lessonId: lesson.id }
+          });
+        }
+        completeActiveTask(state, task, lesson.id);
         return lesson;
       });
     } catch (error) {
       await removeLessonCard(this.config.cardDir, lesson.cardFile).catch(() => {});
       throw error;
-    }
-    if (lesson.reviewStatus === 'approved' && this.#autoScheduleFor(snapshot.user)) await this.learning.scheduleLesson(lesson.id, this.#automaticRunAt(snapshot.user));
-    else if (lesson.reviewStatus === 'approved' && snapshot.user.automation?.notifyActionRequired !== false) {
-      await this.store.transaction((state) => {
-        queueSystemNotice(state, {
-          userId: lesson.userId,
-          kind: 'lesson_ready_to_schedule',
-          title: 'Lesson ready to schedule',
-          message: `“${lesson.title}” passed validation and is waiting for your delivery decision.`,
-          actionUrl: `${this.learning.accessUrl(snapshot.user)}#lesson=${lesson.id}`,
-          actionLabel: 'Open lesson',
-          dedupeKey: `lesson-ready-unscheduled:${lesson.id}:r${lesson.revisionNumber || 0}`,
-          metadata: { lessonId: lesson.id }
-        });
-      });
     }
     return { kind: 'lesson', lesson };
   }
@@ -595,7 +669,7 @@ export class BusinessActionsService {
       throw error;
     }
     const submittedSources = cleanSourceSubmissions(result, 20);
-    const fetchedSources = await this.research.fetchUrls(submittedSources.map((source) => ({ id: String(source.id), title: String(source.title || source.url), url: String(source.url), sourceType: String(source.sourceType || ''), claimsSupported: Array.isArray(source.claimsSupported) ? source.claimsSupported.map(String) : [] })));
+    const fetchedSources = await this.research.fetchUrls(submittedSources);
     const normalized = normalizeBookAnalysis(result, snapshot.book, snapshot.user);
     const auditIssues = businessAuditIssues(result, { minimumSources: snapshot.book.ownedCopy ? 1 : 2 });
     const successfulSources = fetchedSources.filter((source) => source.fetchStatus === 'ok');
@@ -690,6 +764,7 @@ export class BusinessActionsService {
           metadata: { bookId: target.id }
         });
       }
+      completeActiveTask(state, task, target.id, { submissionDiagnostics });
       return target;
     });
     return { kind: 'book_analysis', book, plan, requiresOwnedCopy: book.status === 'source_required' };
@@ -708,11 +783,7 @@ export class BusinessActionsService {
     if (!planItem) throw new Error('Book plan item no longer exists');
 
     const submittedSources = cleanSourceSubmissions(result, 16);
-    const fetchedSources = await this.research.fetchUrls(submittedSources.map((source) => ({
-      id: String(source.id), title: String(source.title || source.url), url: String(source.url),
-      sourceType: String(source.sourceType || ''),
-      claimsSupported: Array.isArray(source.claimsSupported) ? source.claimsSupported.map(String) : []
-    })));
+    const fetchedSources = await this.research.fetchUrls(submittedSources);
     if (snapshot.book.ownedCopy) fetchedSources.unshift({ id: 'book_text', title: `${snapshot.book.title} — user-owned copy`, url: '', domain: 'local-owned-copy', accessedAt: nowIso(), fetchStatus: 'ok', excerpt: 'Privately uploaded and extracted user-owned book text.', sourceType: 'owned_copy', claimsSupported: ['book content'] });
 
     const normalized = normalizeBookSession(result, snapshot.book, planItem, snapshot.user, fetchedSources);
@@ -748,34 +819,50 @@ export class BusinessActionsService {
       await this.store.transaction((state) => {
         assertActiveTaskContext(state, task);
         if (!state.books?.[session.bookId] || !state.bookPlans?.[plan.id]) throw new Error('Book session context no longer exists');
+        const running = Object.values(state.jobs || {}).find((job) => job.type === 'deliver_book_session' && job.payload?.sessionId === session.id && job.status === 'running');
+        if (running) throw new Error('Book-session delivery is already in progress');
         state.bookSessions ||= {};
         state.bookSessions[session.id] = session;
-      for (const job of Object.values(state.jobs || {})) {
-        if (job.type === 'deliver_book_session' && job.payload?.sessionId === session.id && job.status === 'pending') {
-          job.status = 'cancelled'; job.cancelledAt = nowIso(); job.updatedAt = nowIso();
+        for (const job of Object.values(state.jobs || {})) {
+          if (job.type === 'deliver_book_session' && job.payload?.sessionId === session.id && job.status === 'pending') {
+            job.status = 'cancelled'; job.cancelledAt = nowIso(); job.updatedAt = nowIso();
+          }
         }
-      }
-      const book = state.books[session.bookId];
-      book.concepts ||= [];
-      for (const concept of session.concepts) if (!book.concepts.some((item) => item.name.toLowerCase() === concept.name.toLowerCase())) book.concepts.push({ ...concept, mastery: 'introduced', sourceSessionId: session.id });
-      book.topicLinkSuggestions ||= [];
-      for (const link of session.topicLinkSuggestions) {
-        const exists = book.topicLinkSuggestions.some((item) => item.concept.toLowerCase() === link.concept.toLowerCase() && item.topic.toLowerCase() === link.topic.toLowerCase());
-        if (!exists) book.topicLinkSuggestions.push(link);
-      }
-      book.updatedAt = nowIso();
-      if (snapshot.user.automation?.notifyActionRequired !== false && session.reviewStatus === 'needs_review') {
-        queueSystemNotice(state, {
-          userId: session.userId,
-          kind: 'book_session_review_required',
-          title: 'Book session needs your review',
-          message: `“${snapshot.book.title} — Session ${session.sessionNumber}” is ready, but automated validation found ${session.quality.issues.length} item(s) requiring your decision.`,
-          actionUrl: `${this.learning.accessUrl(snapshot.user)}#book-session=${session.id}`,
-          actionLabel: 'Review book session',
-          dedupeKey: `book-session-review:${session.id}:r${session.revisionNumber || 0}`,
-          metadata: { bookId: session.bookId, sessionId: session.id, issues: session.quality.issues }
-        });
-      }
+        const book = state.books[session.bookId];
+        book.concepts ||= [];
+        for (const concept of session.concepts) if (!book.concepts.some((item) => item.name.toLowerCase() === concept.name.toLowerCase())) book.concepts.push({ ...concept, mastery: 'introduced', sourceSessionId: session.id });
+        book.topicLinkSuggestions ||= [];
+        for (const link of session.topicLinkSuggestions) {
+          const exists = book.topicLinkSuggestions.some((item) => item.concept.toLowerCase() === link.concept.toLowerCase() && item.topic.toLowerCase() === link.topic.toLowerCase());
+          if (!exists) book.topicLinkSuggestions.push(link);
+        }
+        book.updatedAt = nowIso();
+        if (snapshot.user.automation?.notifyActionRequired !== false && session.reviewStatus === 'needs_review') {
+          queueSystemNotice(state, {
+            userId: session.userId,
+            kind: 'book_session_review_required',
+            title: 'Book session needs your review',
+            message: `“${snapshot.book.title} — Session ${session.sessionNumber}” is ready, but automated validation found ${session.quality.issues.length} item(s) requiring your decision.`,
+            actionUrl: `${this.learning.accessUrl(snapshot.user)}#book-session=${session.id}`,
+            actionLabel: 'Review book session',
+            dedupeKey: `book-session-review:${session.id}:r${session.revisionNumber || 0}`,
+            metadata: { bookId: session.bookId, sessionId: session.id, issues: session.quality.issues }
+          });
+        } else if (session.reviewStatus === 'approved' && this.#autoScheduleFor(snapshot.user)) {
+          scheduleAcceptedBookSession(state, session, this.#automaticRunAt(snapshot.user));
+        } else if (session.reviewStatus === 'approved' && snapshot.user.automation?.notifyActionRequired !== false) {
+          queueSystemNotice(state, {
+            userId: session.userId,
+            kind: 'book_session_ready_to_schedule',
+            title: 'Book session ready to schedule',
+            message: `“${snapshot.book.title} — Session ${session.sessionNumber}” passed validation and is waiting for your delivery decision.`,
+            actionUrl: `${this.learning.accessUrl(snapshot.user)}#book-session=${session.id}`,
+            actionLabel: 'Open book session',
+            dedupeKey: `book-session-ready-unscheduled:${session.id}:r${session.revisionNumber || 0}`,
+            metadata: { bookId: session.bookId, sessionId: session.id }
+          });
+        }
+        completeActiveTask(state, task, session.id);
         return session;
       });
     } catch (error) {
@@ -783,45 +870,39 @@ export class BusinessActionsService {
       throw error;
     }
 
-    if (session.reviewStatus === 'approved' && this.#autoScheduleFor(snapshot.user)) {
-      await this.books.scheduleSession(session.id, this.#automaticRunAt(snapshot.user));
-    } else if (session.reviewStatus === 'approved' && snapshot.user.automation?.notifyActionRequired !== false) {
-      await this.store.transaction((state) => {
-        queueSystemNotice(state, {
-          userId: session.userId,
-          kind: 'book_session_ready_to_schedule',
-          title: 'Book session ready to schedule',
-          message: `“${snapshot.book.title} — Session ${session.sessionNumber}” passed validation and is waiting for your delivery decision.`,
-          actionUrl: `${this.learning.accessUrl(snapshot.user)}#book-session=${session.id}`,
-          actionLabel: 'Open book session',
-          dedupeKey: `book-session-ready-unscheduled:${session.id}:r${session.revisionNumber || 0}`,
-          metadata: { bookId: session.bookId, sessionId: session.id }
-        });
-      });
-    }
     return { kind: isFinale ? 'book_finale' : 'book_session', session };
   }
 
   async #submitFollowUp(task, result) {
-    if (String(result.answer || '').trim().length < 20) throw new Error('Follow-up answer is missing or too short');
+    const answer = clean(result.answer, 12000);
+    if (answer.length < 20) throw new Error('Follow-up answer is missing or too short');
     if (result.verification?.accuracyChecked !== true || result.verification?.noFabricationPassed !== true) throw new Error('Follow-up verification did not pass');
+    const sourceUrls = cleanFollowUpSourceUrls(result.sourceUrls);
     const updated = await this.store.transaction((state) => {
+      assertActiveTaskContext(state, task);
       const interaction = state.interactions[task.payload.interactionId]; if (!interaction) throw new Error('Follow-up interaction not found');
-      interaction.answer = String(result.answer || ''); interaction.confidence = ['high', 'medium', 'low'].includes(result.confidence) ? result.confidence : 'medium';
-      interaction.needsNewLesson = Boolean(result.needsNewLesson); interaction.suggestedTopic = String(result.suggestedTopic || '');
-      interaction.sourceUrls = Array.isArray(result.sourceUrls) ? result.sourceUrls.map(String).slice(0, 8) : [];
-      interaction.status = 'completed'; interaction.completedAt = nowIso(); return interaction;
+      interaction.answer = answer;
+      interaction.confidence = ['high', 'medium', 'low'].includes(result.confidence) ? result.confidence : 'medium';
+      interaction.needsNewLesson = Boolean(result.needsNewLesson);
+      interaction.suggestedTopic = clean(result.suggestedTopic, 300);
+      interaction.sourceUrls = sourceUrls;
+      interaction.status = 'completed'; interaction.completedAt = nowIso();
+      if (task.payload.origin && task.payload.origin !== 'web') queueDirectResponse(state, task.userId, interaction.answer, task.payload.origin, interaction.id);
+      completeActiveTask(state, task, interaction.id);
+      return interaction;
     });
-    if (task.payload.origin && task.payload.origin !== 'web') await this.#queueDirectResponse(task.userId, updated.answer, task.payload.origin, updated.id);
     return { kind: task.type === 'book_follow_up' ? 'book_follow_up' : 'follow_up', interaction: updated };
   }
 
   async #submitReinforcement(task, result) {
     if (result.verification?.fairnessChecked !== true) throw new Error('Reinforcement fairness verification did not pass');
-    if (!String(result.feedback || '').trim() || !String(result.idealAnswer || '').trim()) throw new Error('Reinforcement feedback and ideal answer are required');
+    const feedback = clean(result.feedback, 4000);
+    const idealAnswer = clean(result.idealAnswer, 5000);
+    if (!feedback || !idealAnswer) throw new Error('Reinforcement feedback and ideal answer are required');
     const updated = await this.store.transaction((state) => {
+      assertActiveTaskContext(state, task);
       const interaction = state.interactions[task.payload.interactionId]; if (!interaction) throw new Error('Reinforcement interaction not found');
-      interaction.evaluation = { correct: Boolean(result.correct), score: Math.max(0, Math.min(100, Number(result.score) || 0)), feedback: String(result.feedback || ''), idealAnswer: String(result.idealAnswer || '') };
+      interaction.evaluation = { correct: Boolean(result.correct), score: Math.max(0, Math.min(100, Number(result.score) || 0)), feedback, idealAnswer };
       interaction.status = 'completed'; interaction.completedAt = nowIso();
       if (task.type === 'book_reinforcement_evaluation' && interaction.evaluation.score >= 70) {
         const session = state.bookSessions?.[task.payload.sessionId];
@@ -836,13 +917,13 @@ export class BusinessActionsService {
           book.updatedAt = nowIso();
         }
       }
+      const text = `${interaction.evaluation.feedback}\n\nSuggested answer: ${interaction.evaluation.idealAnswer}`;
+      if (task.payload.origin && task.payload.origin !== 'web') queueDirectResponse(state, task.userId, text, task.payload.origin, interaction.id);
+      completeActiveTask(state, task, interaction.id);
       return interaction;
     });
-    const text = `${updated.evaluation.feedback}\n\nSuggested answer: ${updated.evaluation.idealAnswer}`;
-    if (task.payload.origin && task.payload.origin !== 'web') await this.#queueDirectResponse(task.userId, text, task.payload.origin, updated.id);
     return { kind: task.type === 'book_reinforcement_evaluation' ? 'book_reinforcement_evaluation' : 'reinforcement_evaluation', interaction: updated };
   }
-
 
   #autoScheduleFor(user) {
     return this.config.autoScheduleApproved !== false && user?.automation?.autoScheduleApproved !== false;
@@ -851,13 +932,5 @@ export class BusinessActionsService {
   #automaticRunAt(user) {
     const delay = Math.max(0, Math.min(1440, Number(user?.automation?.autoScheduleDelayMinutes ?? this.config.autoScheduleDelayMinutes ?? 2) || 0));
     return new Date(Date.now() + delay * 60_000).toISOString();
-  }
-
-  async #queueDirectResponse(userId, text, origin, interactionId) {
-    await this.store.transaction((state) => {
-      if (!state.users?.[userId]) return null;
-      const job = { id: uid('job'), type: 'send_direct_response', userId, payload: { text: String(text).slice(0, 12000), origin, interactionId }, runAt: nowIso(), status: 'pending', attempts: 0, lastError: null, createdAt: nowIso(), updatedAt: nowIso() };
-      state.jobs[job.id] = job; return job;
-    });
   }
 }

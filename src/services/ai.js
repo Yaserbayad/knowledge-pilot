@@ -1,4 +1,7 @@
+import { readFetchText } from '../http-response.js';
 import { extractJson } from '../utils.js';
+
+const MAX_AI_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 export class AiService {
   constructor(config, logger) {
@@ -33,7 +36,7 @@ export class AiService {
       }),
       signal: AbortSignal.timeout(120000)
     });
-    const body = await response.text();
+    const body = await readFetchText(response, MAX_AI_RESPONSE_BYTES, 'AI response');
     if (!response.ok) throw new Error(`AI request failed (${response.status}): ${body.slice(0, 500)}`);
     const parsed = JSON.parse(body);
     const content = parsed.choices?.[0]?.message?.content;
@@ -57,7 +60,7 @@ export class AiService {
       }),
       signal: AbortSignal.timeout(180000)
     });
-    const body = await response.text();
+    const body = await readFetchText(response, MAX_AI_RESPONSE_BYTES, 'Ollama response');
     if (!response.ok) throw new Error(`Ollama request failed (${response.status}): ${body.slice(0, 500)}`);
     const parsed = JSON.parse(body);
     const json = extractJson(parsed.message?.content || '');

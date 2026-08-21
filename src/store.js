@@ -42,6 +42,16 @@ export class JsonStore {
     try {
       const raw = await fs.readFile(this.stateFile, 'utf8');
       this.state = JSON.parse(raw);
+      const recordedSchemaVersion = this.state?.meta?.schemaVersion;
+      if (recordedSchemaVersion != null) {
+        const numericSchemaVersion = Number(recordedSchemaVersion);
+        if (!Number.isInteger(numericSchemaVersion) || numericSchemaVersion < 1) {
+          throw new Error(`Invalid state schema version: ${recordedSchemaVersion}`);
+        }
+        if (numericSchemaVersion > STATE_SCHEMA_VERSION) {
+          throw new Error(`Unsupported state schema version ${numericSchemaVersion}; this release supports up to ${STATE_SCHEMA_VERSION}`);
+        }
+      }
       this.state.users ||= {};
       this.state.plans ||= {};
       this.state.lessons ||= {};
@@ -88,19 +98,28 @@ export class JsonStore {
   async transaction(mutator) {
     const run = async () => {
       const draft = structuredClone(this.state);
+      const completedTasks = new Map(Object.values(this.state.businessTasks || {})
+        .filter((task) => task?.status === 'completed' && task.id)
+        .map((task) => [task.id, structuredClone(task)]));
       const result = await mutator(draft);
+      for (const [taskId, accepted] of completedTasks) {
+        const current = draft.businessTasks?.[taskId];
+        if (!current || current.status === 'completed') continue;
+        for (const key of Object.keys(current)) delete current[key];
+        Object.assign(current, structuredClone(accepted));
+      }
       draft.meta.updatedAt = nowIso();
+      await this.persist(draft);
       this.state = draft;
-      await this.persist();
       return structuredClone(result);
     };
     this.writeQueue = this.writeQueue.then(run, run);
     return this.writeQueue;
   }
 
-  async persist() {
+  async persist(state = this.state) {
     const temp = `${this.stateFile}.tmp`;
-    const data = `${JSON.stringify(this.state, null, 2)}\n`;
+    const data = `${JSON.stringify(state, null, 2)}\n`;
     await fs.writeFile(temp, data, { mode: 0o600 });
     await fs.rename(temp, this.stateFile);
   }

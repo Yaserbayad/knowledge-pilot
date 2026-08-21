@@ -8,10 +8,22 @@ const MAX_EXTRACTED_CHARS = 2_500_000;
 const MAX_EPUB_ENTRIES = 2000;
 const MAX_EPUB_ENTRY_BYTES = 8 * 1024 * 1024;
 const MAX_EPUB_TOTAL_BYTES = 80 * 1024 * 1024;
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 function safeBaseName(value) {
   const name = path.basename(String(value || 'book-source.txt')).replace(/[^a-zA-Z0-9._-]/g, '_');
   return name.slice(0, 140) || 'book-source.txt';
+}
+
+function safeId(value, label) {
+  const id = String(value || '');
+  if (!SAFE_ID.test(id)) throw new Error(`Invalid owned-copy ${label}`);
+  return id;
+}
+
+function isContained(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
 function decodeEntities(text) {
@@ -81,31 +93,54 @@ async function extractEpub(buffer) {
 
 export class BookFileService {
   constructor({ rootDir, logger = console }) {
-    this.rootDir = rootDir;
+    this.rootDir = path.resolve(rootDir);
+    this.rootRealPath = null;
     this.logger = logger;
   }
 
   async init() {
-    await fs.mkdir(this.rootDir, { recursive: true });
+    await fs.mkdir(this.rootDir, { recursive: true, mode: 0o700 });
+    this.rootRealPath = await fs.realpath(this.rootDir);
     return this;
+  }
+
+  #lexicalPath(storedPath) {
+    if (!this.rootRealPath) throw new Error('Owned-copy storage is not initialized');
+    const value = String(storedPath || '');
+    if (!value) throw new Error('Unsafe owned-copy path');
+    const candidate = path.isAbsolute(value) ? path.resolve(value) : path.resolve(this.rootRealPath, value);
+    if (!isContained(this.rootRealPath, candidate)) throw new Error('Unsafe owned-copy path');
+    return candidate;
+  }
+
+  async #existingContainedPath(storedPath) {
+    const candidate = this.#lexicalPath(storedPath);
+    const resolved = await fs.realpath(candidate);
+    if (!isContained(this.rootRealPath, resolved)) throw new Error('Unsafe owned-copy path');
+    return { candidate, resolved };
   }
 
   async save({ userId, bookId, filename, buffer }) {
     if (!Buffer.isBuffer(buffer)) throw new Error('Uploaded source must be binary data');
     if (!buffer.length) throw new Error('Uploaded source is empty');
     if (buffer.length > MAX_FILE_BYTES) throw new Error('Owned-copy upload exceeds the 30 MB limit');
+    const safeUserId = safeId(userId, 'user id');
+    const safeBookId = safeId(bookId, 'book id');
     const safeName = safeBaseName(filename);
     const ext = path.extname(safeName).toLowerCase();
     if (!ALLOWED.has(ext)) throw new Error('Supported owned-copy formats are PDF, EPUB, TXT, and Markdown');
     if (ext === '.pdf' && buffer.subarray(0, 5).toString('ascii') !== '%PDF-') throw new Error('The uploaded file is not a valid PDF');
     if (ext === '.epub' && !(buffer[0] === 0x50 && buffer[1] === 0x4b)) throw new Error('The uploaded file is not a valid EPUB archive');
-    const dir = path.join(this.rootDir, userId, bookId);
+    const dir = path.join(this.rootRealPath, safeUserId, safeBookId);
+    if (!isContained(this.rootRealPath, dir)) throw new Error('Unsafe owned-copy path');
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    const realDir = await fs.realpath(dir);
+    if (!isContained(this.rootRealPath, realDir)) throw new Error('Unsafe owned-copy path');
     const nonce = crypto.randomUUID().replaceAll('-', '');
-    const originalPath = path.join(dir, `original-${nonce}-${safeName}`);
-    const textPath = path.join(dir, `source-${nonce}.txt`);
-    const tempOriginal = path.join(dir, `.upload-${nonce}-${safeName}`);
-    const tempText = path.join(dir, `.source-${nonce}.txt`);
+    const originalPath = path.join(realDir, `original-${nonce}-${safeName}`);
+    const textPath = path.join(realDir, `source-${nonce}.txt`);
+    const tempOriginal = path.join(realDir, `.upload-${nonce}-${safeName}`);
+    const tempText = path.join(realDir, `.source-${nonce}.txt`);
     let text = '';
     try {
       await fs.writeFile(tempOriginal, buffer, { mode: 0o600 });
@@ -127,26 +162,32 @@ export class BookFileService {
       sizeBytes: buffer.length,
       extractedCharacters: text.length,
       uploadedAt: new Date().toISOString(),
-      originalPath: path.relative(this.rootDir, originalPath),
-      textPath: path.relative(this.rootDir, textPath)
+      originalPath: path.relative(this.rootRealPath, originalPath),
+      textPath: path.relative(this.rootRealPath, textPath)
     };
   }
 
   async removeSource(source) {
-    const root = path.resolve(this.rootDir);
     const targets = [source?.originalPath, source?.textPath].filter(Boolean);
     for (const storedPath of targets) {
-      const target = path.isAbsolute(storedPath) ? path.resolve(storedPath) : path.resolve(root, storedPath);
-      const relative = path.relative(root, target);
-      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Unsafe owned-copy path');
-      await fs.rm(target, { force: true });
+      const candidate = this.#lexicalPath(storedPath);
+      try {
+        const { resolved } = await this.#existingContainedPath(storedPath);
+        if (!isContained(this.rootRealPath, resolved)) throw new Error('Unsafe owned-copy path');
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue;
+        throw error;
+      }
+      await fs.rm(candidate, { force: true });
     }
   }
 
   async chunk(source, offset = 0, limit = 16000) {
     if (!source?.textPath) throw new Error('No extracted owned-copy text is available');
-    const storedPath = path.isAbsolute(source.textPath) ? source.textPath : path.join(this.rootDir, source.textPath);
-    const text = await fs.readFile(storedPath, 'utf8');
+    const { resolved } = await this.#existingContainedPath(source.textPath);
+    const stat = await fs.stat(resolved);
+    if (!stat.isFile()) throw new Error('Owned-copy text path is not a file');
+    const text = await fs.readFile(resolved, 'utf8');
     const safeOffset = Math.max(0, Number(offset) || 0);
     const safeLimit = Math.min(Math.max(Number(limit) || 16000, 1000), 24000);
     return {
@@ -159,9 +200,17 @@ export class BookFileService {
   }
 
   async removeBook(userId, bookId) {
-    const target = path.resolve(this.rootDir, String(userId), String(bookId));
-    const relative = path.relative(path.resolve(this.rootDir), target);
-    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Unsafe owned-copy path');
+    const safeUserId = safeId(userId, 'user id');
+    const safeBookId = safeId(bookId, 'book id');
+    const target = path.resolve(this.rootRealPath, safeUserId, safeBookId);
+    if (!isContained(this.rootRealPath, target)) throw new Error('Unsafe owned-copy path');
+    try {
+      const resolved = await fs.realpath(target);
+      if (!isContained(this.rootRealPath, resolved)) throw new Error('Unsafe owned-copy path');
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
     await fs.rm(target, { recursive: true, force: true });
   }
 }

@@ -1,6 +1,6 @@
-# Knowledge Pilot 1.4.1
+# Knowledge Pilot
 
-Knowledge Pilot is a self-hosted adaptive topic-learning and guided-reading system. It delivers validated lessons and book sessions through a private learner dashboard, Telegram, and optional WhatsApp Web. Operational state is stored in an atomic local JSON database; learner-owned book files remain in a private server directory.
+Knowledge Pilot is a self-hosted adaptive topic-learning and guided-reading system. It delivers validated lessons and book sessions through a private learner dashboard, Telegram, and optional WhatsApp Web. Operational state is stored in an atomic local JSON database; learner-owned book files remain in a private server directory. Release identity is defined by the immutable GitHub release tag and the repository `VERSION` file.
 
 ## Product workflow
 
@@ -25,7 +25,7 @@ Learners can disable automatic scheduling or change the delivery delay at any ti
 - Verified five-to-ten-minute lessons
 - Closed-by-default Today cards, structured lesson covers, and a centered guided reader
 - Durable section anchors, cross-device resume, race-safe autosave, knowledge checks, notes, highlights, and confidence review
-- Soft light, dark, and warm reading themes, text sizing, focus mode, accessible drawers, and complete lesson-level RTL behavior
+- Soft light, dark, and warm reading themes, text sizing, focus mode, accessible dialogs, and complete lesson-level RTL behavior
 - Claim/source mapping, adversarial critique, final audit, and automated quality gates
 - Self-service review, revision, scheduling, skipping, completion, feedback, follow-ups, reminders, reinforcement, progress, and library
 
@@ -44,12 +44,13 @@ Learners can disable automatic scheduling or change the delivery delay at any ti
 - Schema version 5 with backward-compatible lesson-experience normalization
 - Learner self-deletion and administrator deletion with complete user-owned data and private-file cleanup
 - Atomic JSON writes and rotating state backups
-- Idempotent completion and skipping, plus duplicate guards after delivery is recorded
-- Stale scheduler-job and GPT-task recovery
-- Per-user ownership checks on all learner actions
+- Idempotent completion/skipping and fail-closed handling of ambiguous external delivery effects
+- Stale scheduler-job and verified-processing task recovery
+- Per-user ownership checks on learner actions and signed expiring channel bindings
 - Private signed learner links in channel messages
+- Bounded outbound HTTP responses, SSRF protections, pinned validated DNS resolution, and strict production endpoint validation
+- Strict browser security headers/CSP, origin protection for authenticated mutations, safe request logging, and correlation IDs
 - Clear separation between verified-processing tasks, local scheduled jobs, review holds, and delivery state
-- Web-visible action notices before the scheduler has finished sending channel notifications
 
 ## Architecture
 
@@ -63,54 +64,49 @@ Node.js service ---------------- Atomic JSON state
    |                                  sessions, jobs, notices, progress
    +-- Telegram / optional WhatsApp
    +-- private owned-copy files
-   +-- authenticated GPT Action API
+   +-- authenticated verified-processing API
                     |
-                    v
-          Private ChatGPT Business custom GPT
-       research -> draft -> critique -> audit -> submit
+        +-----------+-----------+
+        |                       |
+        v                       v
+Private ChatGPT Business   Optional Workspace Agent bridge
+processing workflow        (loopback MCP + guarded trigger)
 ```
 
-## ChatGPT Business limitation
+## ChatGPT Business processing
 
-A ChatGPT Business subscription cannot be invoked unattended by this server. In `chatgpt_business` mode, Knowledge Pilot queues verified-processing tasks and notifies the learner when the custom GPT must be opened. Run:
+In `chatgpt_business` mode, Knowledge Pilot queues bounded verified-processing tasks rather than sending learner content to an OpenAI API from the application server.
 
-```text
-Process all pending Knowledge Pilot tasks.
-```
+Two operating modes are supported:
 
-Everything after a valid submission—quality gating, scheduling, delivery, reminders, and learner review—is automated. Fully unattended generation requires a separately configured API or local model.
+- **Manual fallback:** open the configured private ChatGPT Business processing workflow and process pending Knowledge Pilot tasks.
+- **Workspace Agent automation:** `automation/workspace-agent` exposes the bounded queue through an authenticated loopback MCP bridge and invokes a published ChatGPT Workspace Agent only when pending work exists. Trigger intent/idempotency is persisted before the external call and ambiguous runs fail closed. The automatic timer must remain disabled until end-to-end lesson and book automation are verified on the target installation.
 
-## Installation
+Everything after a valid result submission—quality gating, scheduling, delivery, reminders, learner review, and local recovery—is handled by Knowledge Pilot.
+
+## Installation and deployment
+
+For production aaPanel deployment, use [START-HERE.md](START-HERE.md) and the canonical [immutable-release runbook](docs/AAPANEL_DEPLOYMENT.md). Production releases are staged and verified from an immutable release tag/SHA; do not deploy a moving branch or reuse an old `automation/` or `node_modules/` directory.
+
+For a brand-new configuration before first production start:
 
 ```bash
 cd /www/wwwroot/knowledgepilot
 cp .env.example .env
 node scripts/generate-secrets.js
-npm install --omit=dev
+# Edit .env without exposing its values in logs.
+npm ci --omit=dev --ignore-scripts
 node scripts/verify-config.js
 npm run check
 ```
 
-Set at minimum:
+The repository-owned `scripts/install-aapanel.sh` is a fail-closed **release preparation** command for an existing configured staging tree. It performs a locked production install and verification but never starts or changes a process manager.
 
-```dotenv
-APP_BASE_URL=https://learn.example.com
-AI_PROVIDER=chatgpt_business
-GPT_ACTIONS_ENABLED=true
-GPT_AUTO_SCHEDULE_APPROVED=true
-GPT_AUTO_SCHEDULE_DELAY_MINUTES=2
-AUTO_START_FIRST_PLAN=true
-NOTIFY_ACTION_REQUIRED=true
-CUSTOM_GPT_URL=https://chatgpt.com/g/...
-```
-
-Use one process manager only. The supported entry point is:
+Use one process manager only. The supported application entry point is:
 
 ```bash
 node src/index.js
 ```
-
-For aaPanel and safe upgrades, read [START-HERE.md](START-HERE.md), [UPGRADE-1.4.1.md](UPGRADE-1.4.1.md), and [docs/AAPANEL_DEPLOYMENT.md](docs/AAPANEL_DEPLOYMENT.md).
 
 ## Data layout
 
@@ -135,21 +131,32 @@ npm run generate-secrets
 node scripts/verify-config.js
 ```
 
-## GPT Action
+Workspace Agent verification is separate:
+
+```bash
+cd automation/workspace-agent
+npm ci --ignore-scripts
+npm run check
+npm audit --omit=dev --audit-level=high
+```
+
+## Verified-processing action
 
 - Schema: `https://YOUR_DOMAIN/gpt-action/openapi.json`
 - Authentication: Bearer value from `GPT_ACTION_API_KEY`
-- Instructions: `docs/CUSTOM_GPT_INSTRUCTIONS.md`
+- Processing instructions: `docs/CUSTOM_GPT_INSTRUCTIONS.md`
 
-After an upgrade, reimport the schema and replace the custom GPT instructions.
+When the action contract or processing instructions change, update the configured ChatGPT Business processing workflow before enabling unattended triggers.
 
 ## Security
 
 - Bind Node.js to `127.0.0.1`; expose only the HTTPS reverse proxy.
 - Keep `.env`, `data/`, and owned copies outside public static routes.
-- Run one instance under a dedicated restricted user.
+- Run one application instance under a dedicated restricted user.
 - Allow at least 35 MB request bodies in Nginx for 30 MB uploads.
-- GPT access to owned text is authenticated, bounded, and read-only.
+- Verified-processing access to owned text is authenticated, bounded, and read-only.
 - Learner APIs verify record ownership and return no cross-user content.
+- Keep the Workspace Agent MCP service on loopback and expose only its authenticated unguessable proxy route when required.
+- Use repository-specific read-only GitHub deployment credentials on the server; remove temporary write-capable bootstrap credentials before production closure.
 
-See [docs/SECURITY.md](docs/SECURITY.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [docs/CHATGPT_BUSINESS_SETUP.md](docs/CHATGPT_BUSINESS_SETUP.md).
+See [docs/SECURITY.md](docs/SECURITY.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/CHATGPT_BUSINESS_SETUP.md](docs/CHATGPT_BUSINESS_SETUP.md), and [automation/workspace-agent/README.md](automation/workspace-agent/README.md).

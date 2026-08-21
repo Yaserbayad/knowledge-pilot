@@ -12,6 +12,37 @@ function error(e) { $('#error').textContent = e.message || String(e); $('#error'
 function badge(status) { const cls = /approved|completed|connected|ok/.test(status) ? 'good' : /failed|rejected|error/.test(status) ? 'bad' : 'warn'; return `<span class="badge ${cls}">${esc(status)}</span>`; }
 function fmt(date) { return date ? new Date(date).toLocaleString() : '—'; }
 
+function openDialogSurface(html, { labelId = 'dialog-title', initialFocus = '[autofocus], #close, button, a[href], input, textarea, select' } = {}) {
+  const dialog = $('#dialog');
+  const previous = document.activeElement;
+  dialog.innerHTML = html;
+  dialog.setAttribute('aria-labelledby', labelId);
+  dialog.classList.remove('hidden');
+  const close = () => {
+    dialog.classList.add('hidden');
+    dialog.innerHTML = '';
+    dialog.removeAttribute('aria-labelledby');
+    dialog.onclick = null;
+    dialog.onkeydown = null;
+    previous?.focus?.();
+  };
+  dialog.onclick = (event) => { if (event.target === dialog) close(); };
+  dialog.onkeydown = (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+    if (event.key === 'Tab') {
+      const focusable = [...dialog.querySelectorAll('button, a[href], input, textarea, select, [tabindex]:not([tabindex="-1"])')]
+        .filter((item) => !item.disabled && !item.hidden && item.getAttribute('aria-hidden') !== 'true');
+      if (!focusable.length) { event.preventDefault(); return; }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  };
+  dialog.querySelector(initialFocus)?.focus();
+  return { dialog, close };
+}
+
 async function checkSession() {
   try { await refresh(); $('#login').classList.add('hidden'); $('#admin-workspace').classList.remove('hidden'); }
   catch { $('#login').classList.remove('hidden'); }
@@ -86,7 +117,7 @@ function renderUsers() {
 function renderPlans() {
   $('#tab-plans').innerHTML = `<div class="card"><h2>Weekly plans</h2>${state.plans.length ? `<div class="list">${state.plans.map((p) => {
     const user = state.users.find((u) => u.id === p.userId);
-    return `<div class="list-item"><div class="actions">${badge(p.status)}<span class="badge">${esc(p.weekStart)}</span></div><h3>${esc(p.primarySubject)} — ${esc(user?.name || p.userId)}</h3><p>${esc(p.rationale)}</p>${p.proposals.map((x) => `<div style="padding:.65rem 0;border-top:1px solid var(--line)"><strong>${x.order}. ${esc(x.title)}</strong><br><small>${esc(x.question)}</small><div class="actions" style="margin-top:6px"><button class="secondary generate-lesson" data-plan="${p.id}" data-proposal="${x.id}">${state.status.aiProvider === 'chatgpt_business' ? 'Queue Business lesson' : 'Generate lesson'}</button></div></div>`).join('')}</div>`;
+    return `<div class="list-item"><div class="actions">${badge(p.status)}<span class="badge">${esc(p.weekStart)}</span></div><h3>${esc(p.primarySubject)} — ${esc(user?.name || p.userId)}</h3><p>${esc(p.rationale)}</p>${p.proposals.map((x) => `<div class="admin-proposal-row"><strong>${x.order}. ${esc(x.title)}</strong><br><small>${esc(x.question)}</small><div class="actions admin-row-actions"><button class="secondary generate-lesson" data-plan="${p.id}" data-proposal="${x.id}">${state.status.aiProvider === 'chatgpt_business' ? 'Queue Business lesson' : 'Generate lesson'}</button></div></div>`).join('')}</div>`;
   }).join('')}</div>` : '<p class="muted">No plans yet.</p>'}</div>`;
   document.querySelectorAll('.generate-lesson').forEach((b) => b.onclick = () => sourceDialog(b.dataset.plan, b.dataset.proposal));
 }
@@ -100,17 +131,16 @@ async function sourceDialog(planId, proposalId) {
     } catch (e) { error(e); }
     return;
   }
-  const d = $('#dialog'); d.classList.remove('hidden');
-  d.innerHTML = `<div class="card"><h2>Generate researched lesson</h2><p class="muted">Optional: add trusted source URLs, one per line. SearXNG results are also used when configured.</p><form id="source-form"><label>Source URLs<textarea name="urls"></textarea></label><div class="actions" style="margin-top:12px"><button>Generate</button><button type="button" class="ghost" id="close">Cancel</button></div></form><div id="generation-status"></div></div>`;
-  $('#close').onclick = () => d.classList.add('hidden');
-  $('#source-form').onsubmit = async (event) => { event.preventDefault(); const btn = event.target.querySelector('button'); btn.disabled = true; $('#generation-status').innerHTML = '<p class="notice">Generating and checking the lesson…</p>'; try { const urls = String(new FormData(event.target).get('urls') || '').split(/\s+/).filter(Boolean); await api(`/api/admin/plans/${planId}/generate/${proposalId}`, { method: 'POST', body: JSON.stringify({ sourceUrls: urls }) }); d.classList.add('hidden'); await refresh(); } catch (e) { $('#generation-status').innerHTML = `<p class="notice error">${esc(e.message)}</p>`; } finally { btn.disabled = false; } };
+  const { close } = openDialogSurface(`<div class="card"><h2 id="dialog-title">Generate researched lesson</h2><p class="muted">Optional: add trusted source URLs, one per line. SearXNG results are also used when configured.</p><form id="source-form"><label>Source URLs<textarea name="urls"></textarea></label><div class="actions admin-dialog-actions"><button>Generate</button><button type="button" class="ghost" id="close" aria-label="Close">Cancel</button></div></form><div id="generation-status"></div></div>`, { initialFocus: 'textarea[name="urls"]' });
+  $('#close').onclick = close;
+  $('#source-form').onsubmit = async (event) => { event.preventDefault(); const btn = event.target.querySelector('button'); btn.disabled = true; $('#generation-status').innerHTML = '<p class="notice">Generating and checking the lesson…</p>'; try { const urls = String(new FormData(event.target).get('urls') || '').split(/\s+/).filter(Boolean); await api(`/api/admin/plans/${planId}/generate/${proposalId}`, { method: 'POST', body: JSON.stringify({ sourceUrls: urls }) }); close(); await refresh(); } catch (e) { $('#generation-status').innerHTML = `<p class="notice error">${esc(e.message)}</p>`; } finally { btn.disabled = false; } };
 }
 
 function renderLessons() {
   $('#tab-lessons').innerHTML = `<div class="card"><div class="section-heading"><div><h2>Lessons</h2><p class="muted">Learners normally resolve review holds themselves. Use these controls only as an exceptional override.</p></div><span class="badge">${state.lessons.length}</span></div>${state.lessons.length ? `<div class="list">${state.lessons.map((lesson) => {
     const user = state.users.find((candidate) => candidate.id === lesson.userId);
     const held = ['needs_review', 'needs_changes'].includes(lesson.reviewStatus);
-    return `<div class="list-item"><div class="actions">${badge(lesson.status)}${badge(lesson.reviewStatus)}<span class="badge">Quality ${lesson.quality?.score ?? '—'}</span></div><h3>${esc(lesson.title)}</h3><p>${esc(user?.name || lesson.userId)} · ${esc(lesson.topic)} · ${lesson.estimatedMinutes} min</p>${lesson.quality?.issues?.length ? `<div class="notice warn"><strong>Blocking review findings</strong><br>${lesson.quality.issues.map(esc).join('<br>')}</div>` : ''}${lesson.quality?.warnings?.length ? `<div class="notice"><strong>Non-blocking warnings</strong><br>${lesson.quality.warnings.map(esc).join('<br>')}</div>` : ''}<div class="actions" style="margin-top:10px"><button class="secondary preview" data-id="${lesson.id}">Preview</button>${held ? `<button class="approve" data-id="${lesson.id}">Override: approve & schedule</button>` : lesson.status === 'approved' ? `<button class="schedule" data-id="${lesson.id}">Schedule now</button>` : ''}${!['delivered', 'completed', 'skipped'].includes(lesson.status) ? `<button class="danger reject" data-id="${lesson.id}">Reject</button>` : ''}</div></div>`;
+    return `<div class="list-item"><div class="actions">${badge(lesson.status)}${badge(lesson.reviewStatus)}<span class="badge">Quality ${lesson.quality?.score ?? '—'}</span></div><h3>${esc(lesson.title)}</h3><p>${esc(user?.name || lesson.userId)} · ${esc(lesson.topic)} · ${lesson.estimatedMinutes} min</p>${lesson.quality?.issues?.length ? `<div class="notice warn"><strong>Blocking review findings</strong><br>${lesson.quality.issues.map(esc).join('<br>')}</div>` : ''}${lesson.quality?.warnings?.length ? `<div class="notice"><strong>Non-blocking warnings</strong><br>${lesson.quality.warnings.map(esc).join('<br>')}</div>` : ''}<div class="actions admin-item-actions"><button class="secondary preview" data-id="${lesson.id}">Preview</button>${held ? `<button class="approve" data-id="${lesson.id}">Override: approve & schedule</button>` : lesson.status === 'approved' ? `<button class="schedule" data-id="${lesson.id}">Schedule now</button>` : ''}${!['delivered', 'completed', 'skipped'].includes(lesson.status) ? `<button class="danger reject" data-id="${lesson.id}">Reject</button>` : ''}</div></div>`;
   }).join('')}</div>` : '<p class="muted">No lessons generated.</p>'}</div>`;
   document.querySelectorAll('.approve').forEach((button) => button.onclick = async () => { await api(`/api/admin/lessons/${button.dataset.id}/review`, { method: 'POST', body: JSON.stringify({ decision: 'approve', note: 'Exceptional administrator override' }) }); await refresh(); });
   document.querySelectorAll('.reject').forEach((button) => button.onclick = async () => { await api(`/api/admin/lessons/${button.dataset.id}/review`, { method: 'POST', body: JSON.stringify({ decision: 'reject', note: 'Rejected by administrator override' }) }); await refresh(); });
@@ -119,9 +149,9 @@ function renderLessons() {
 }
 
 function previewLesson(l) {
-  const d = $('#dialog'); d.classList.remove('hidden'); const c = l.content || {};
-  d.innerHTML = `<div class="card"><div class="actions">${badge(l.status)}<button class="ghost" id="close">Close</button></div><h2>${esc(l.title)}</h2><p><strong>${esc(l.question)}</strong></p><p>${esc(c.hook)}</p><h3>Core</h3><p>${esc(c.coreExplanation)}</p><h3>Three ideas</h3><ol>${(c.keyIdeas || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ol><h3>Sources</h3><ol>${(l.sources || []).map((s) => `<li><a href="${esc(s.url)}" target="_blank">${esc(s.title)}</a></li>`).join('')}</ol></div>`;
-  $('#close').onclick = () => d.classList.add('hidden');
+  const c = l.content || {};
+  const { close } = openDialogSurface(`<div class="card"><div class="actions">${badge(l.status)}<button class="ghost" id="close" aria-label="Close">Close</button></div><h2 id="dialog-title">${esc(l.title)}</h2><p><strong>${esc(l.question)}</strong></p><p>${esc(c.hook)}</p><h3>Core</h3><p>${esc(c.coreExplanation)}</p><h3>Three ideas</h3><ol>${(c.keyIdeas || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ol><h3>Sources</h3><ol>${(l.sources || []).map((s) => `<li><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title)}</a></li>`).join('')}</ol></div>`);
+  $('#close').onclick = close;
 }
 
 
@@ -150,24 +180,22 @@ function renderBooksAdmin() {
 }
 
 function previewBookSession(session) {
-  const dialog = $('#dialog');
   const book = state.books.find((item) => item.id === session.bookId);
   const content = session.content || {};
-  dialog.classList.remove('hidden');
-  dialog.innerHTML = `<div class="card"><div class="actions">${badge(session.status)}${badge(session.reviewStatus)}<button class="ghost" id="close">Close</button></div><div class="kicker">${esc(book?.title || 'Book')} · Session ${session.sessionNumber}</div><h2>${esc(session.title)}</h2><h3>Summary</h3><p>${esc(content.summary || '')}</p><h3>Critical assessment</h3><p>${esc(content.criticalAssessment || '')}</p><h3>Three ideas</h3><ol>${(content.keyIdeas || []).map((item) => `<li>${esc(item)}</li>`).join('')}</ol><h3>Sources</h3><ol>${(session.sources || []).filter((source) => source.url).map((source) => `<li><a href="${esc(source.url)}" target="_blank" rel="noopener noreferrer">${esc(source.title)}</a></li>`).join('')}</ol></div>`;
-  $('#close').onclick = () => dialog.classList.add('hidden');
+  const { close } = openDialogSurface(`<div class="card"><div class="actions">${badge(session.status)}${badge(session.reviewStatus)}<button class="ghost" id="close" aria-label="Close">Close</button></div><div class="kicker">${esc(book?.title || 'Book')} · Session ${session.sessionNumber}</div><h2 id="dialog-title">${esc(session.title)}</h2><h3>Summary</h3><p>${esc(content.summary || '')}</p><h3>Critical assessment</h3><p>${esc(content.criticalAssessment || '')}</p><h3>Three ideas</h3><ol>${(content.keyIdeas || []).map((item) => `<li>${esc(item)}</li>`).join('')}</ol><h3>Sources</h3><ol>${(session.sources || []).filter((source) => source.url).map((source) => `<li><a href="${esc(source.url)}" target="_blank" rel="noopener noreferrer">${esc(source.title)}</a></li>`).join('')}</ol></div>`);
+  $('#close').onclick = close;
 }
 
 function renderChannels() {
-  $('#tab-channels').innerHTML = `<div class="grid two"><div class="card"><h2>Telegram</h2><p>Status: ${state.status.telegram ? badge('enabled') : badge('disabled')}</p><p class="muted">The webhook is configured automatically when APP_BASE_URL uses HTTPS.</p></div><div class="card"><h2>WhatsApp Web</h2><p>Status: ${badge(state.status.whatsapp)}</p><form id="wa-pair"><label>Dedicated WhatsApp number<input name="phoneNumber" placeholder="32470123456" required></label><button style="margin-top:12px">Request pairing code</button></form><div id="pair-code"></div><p class="notice warn" style="margin-top:14px">This free connection is unofficial. Use a dedicated opted-in number and keep message volume low.</p></div></div>`;
+  $('#tab-channels').innerHTML = `<div class="grid two"><div class="card"><h2>Telegram</h2><p>Status: ${state.status.telegram ? badge('enabled') : badge('disabled')}</p><p class="muted">The webhook is configured automatically when APP_BASE_URL uses HTTPS.</p></div><div class="card"><h2>WhatsApp Web</h2><p>Status: ${badge(state.status.whatsapp)}</p><form id="wa-pair"><label>Dedicated WhatsApp number<input name="phoneNumber" placeholder="32470123456" required></label><button class="admin-form-submit">Request pairing code</button></form><div id="pair-code"></div><p class="notice warn admin-spaced-notice">This free connection is unofficial. Use a dedicated opted-in number and keep message volume low.</p></div></div>`;
   $('#wa-pair').onsubmit = async (event) => { event.preventDefault(); try { const result = await api('/api/admin/whatsapp/pair', { method: 'POST', body: JSON.stringify({ phoneNumber: new FormData(event.target).get('phoneNumber') }) }); $('#pair-code').innerHTML = `<p>Enter this code in WhatsApp linked devices:</p><pre class="code">${esc(result.pairingCode)}</pre>`; } catch (e) { error(e); } };
 }
 
 function renderOperations() {
   const pendingInternal = state.jobs.filter((job) => job.status === 'pending').length;
   const failedInternal = state.jobs.filter((job) => job.status === 'failed').length;
-  $('#tab-operations').innerHTML = `<div class="grid two"><div class="card"><div class="section-heading"><div><h2>Verified-processing queue</h2><p class="muted">Tasks shown here require the configured Knowledge Pilot custom GPT. They are separate from local scheduler jobs.</p></div><span class="badge">${state.businessTasks.length}</span></div>${state.businessTasks.length ? `<div class="list">${state.businessTasks.slice(0,50).map((task) => `<div class="list-item"><div class="actions">${badge(task.status)}<span class="badge">${esc(task.type)}</span></div><strong>${esc(task.id)}</strong><br><small>${fmt(task.createdAt)} · priority ${task.priority}${task.claimedAt ? ` · claimed ${fmt(task.claimedAt)}` : ''}${task.submissionRejectCount ? ` · ${task.submissionRejectCount} rejected submission(s)` : ''}</small>${task.lastSubmissionError ? `<div class="notice warn" style="margin-top:8px">${esc(task.lastSubmissionError.message || task.error || 'Submission rejected')}${task.lastSubmissionError.details?.length ? `<br><small>${task.lastSubmissionError.details.map(esc).join(' · ')}</small>` : ''}</div>` : task.error ? `<div class="notice warn" style="margin-top:8px">${esc(task.error)}</div>` : ''}</div>`).join('')}</div>` : '<p class="muted">No verified-processing tasks yet.</p>'}${state.status.customGptUrl ? `<a class="button-link" href="${esc(state.status.customGptUrl)}" target="_blank" rel="noopener noreferrer">Open processing GPT</a>` : ''}</div>
-  <div class="card"><h2>Backups</h2><button id="backup-now">Create backup</button><div class="list" style="margin-top:12px">${state.backups.sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).slice(0,10).map((backup) => `<div class="list-item"><strong>${esc(backup.name)}</strong><br><small>${fmt(backup.createdAt)} · ${Math.round(backup.size/1024)} KB</small></div>`).join('')}</div></div>
+  $('#tab-operations').innerHTML = `<div class="grid two"><div class="card"><div class="section-heading"><div><h2>Verified-processing queue</h2><p class="muted">Tasks shown here require the configured Knowledge Pilot custom GPT. They are separate from local scheduler jobs.</p></div><span class="badge">${state.businessTasks.length}</span></div>${state.businessTasks.length ? `<div class="list">${state.businessTasks.slice(0,50).map((task) => `<div class="list-item"><div class="actions">${badge(task.status)}<span class="badge">${esc(task.type)}</span></div><strong>${esc(task.id)}</strong><br><small>${fmt(task.createdAt)} · priority ${task.priority}${task.claimedAt ? ` · claimed ${fmt(task.claimedAt)}` : ''}${task.submissionRejectCount ? ` · ${task.submissionRejectCount} rejected submission(s)` : ''}</small>${task.lastSubmissionError ? `<div class="notice warn admin-compact-notice">${esc(task.lastSubmissionError.message || task.error || 'Submission rejected')}${task.lastSubmissionError.details?.length ? `<br><small>${task.lastSubmissionError.details.map(esc).join(' · ')}</small>` : ''}</div>` : task.error ? `<div class="notice warn admin-compact-notice">${esc(task.error)}</div>` : ''}</div>`).join('')}</div>` : '<p class="muted">No verified-processing tasks yet.</p>'}${state.status.customGptUrl ? `<a class="button-link" href="${esc(state.status.customGptUrl)}" target="_blank" rel="noopener noreferrer">Open processing GPT</a>` : ''}</div>
+  <div class="card"><h2>Backups</h2><button id="backup-now">Create backup</button><div class="list admin-spaced-list">${state.backups.sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).slice(0,10).map((backup) => `<div class="list-item"><strong>${esc(backup.name)}</strong><br><small>${fmt(backup.createdAt)} · ${Math.round(backup.size/1024)} KB</small></div>`).join('')}</div></div>
   <div class="card"><div class="section-heading"><div><h2>Local scheduler jobs</h2><p class="muted">Pending ${pendingInternal} · Failed ${failedInternal}. Future generation jobs are expected and are not the same as GPT tasks ready to process.</p></div></div><div class="list">${state.jobs.slice(0,40).map((job) => `<div class="list-item"><div class="actions">${badge(job.status)}<span class="badge">${esc(job.type)}</span></div><small>Run: ${fmt(job.runAt)} · attempts ${job.attempts || 0}${job.lastError ? ` · ${esc(job.lastError)}` : ''}</small></div>`).join('')}</div></div></div>`;
   $('#backup-now').onclick = async () => { await api('/api/admin/backups', { method: 'POST', body: '{}' }); await refresh(); };
 }
