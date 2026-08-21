@@ -1,5 +1,5 @@
-const CACHE = 'knowledge-pilot-shell-v1.4.0';
-const SHELL = ['/app', '/assets/styles.css', '/assets/theme.js', '/assets/app.js', '/assets/lesson-experience.js'];
+const CACHE = 'knowledge-pilot-shell-v1.4.1';
+const SHELL = ['/app', '/assets/styles.css', '/assets/theme-init.js', '/assets/theme.js', '/assets/app.js', '/assets/lesson-experience.js'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
