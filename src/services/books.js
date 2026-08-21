@@ -1,4 +1,5 @@
 import { createLessonCard } from './cards.js';
+import { queueSystemNotice } from './notices.js';
 import { clamp, nowIso, uid } from '../utils.js';
 
 export const BOOK_STANDARD = `You are the book-learning engine for Knowledge Pilot.
@@ -69,6 +70,36 @@ function cancelBookJobs(state, bookId, { includeDelivery = false, includeReview 
   }
 }
 
+function queueBookAnalysisTask(state, { businessActions, userId, bookId }) {
+  const user = state.users?.[userId];
+  if (!user) throw new Error('User no longer exists');
+  if (!businessActions) throw new Error('ChatGPT Business Actions service is unavailable');
+  const dedupeKey = `book_analysis:${bookId}:active`;
+  const existing = Object.values(state.businessTasks || {}).find((task) => task.dedupeKey === dedupeKey && ['pending', 'claimed'].includes(task.status));
+  if (existing) return { queued: true, existing: true, task: existing };
+  const task = {
+    id: uid('btask'), type: 'book_analysis', userId, payload: { bookId }, dedupeKey, priority: 95,
+    status: 'pending', claimedAt: null, completedAt: null, attempts: 0, resultRef: null, error: null,
+    createdAt: nowIso(), updatedAt: nowIso()
+  };
+  state.businessTasks ||= {};
+  state.businessTasks[task.id] = task;
+  const actionConfig = businessActions.config || {};
+  if (actionConfig.notifyPendingTasks !== false && user.automation?.notifyActionRequired !== false) {
+    queueSystemNotice(state, {
+      userId,
+      kind: 'processing_required',
+      title: 'Verified processing is waiting',
+      message: 'A book analysis is queued and waiting for the Knowledge Pilot custom GPT to process it.',
+      actionUrl: actionConfig.customGptUrl || businessActions.learning?.accessUrl(user) || '',
+      actionLabel: actionConfig.customGptUrl ? 'Open Knowledge Pilot GPT' : 'Open dashboard',
+      dedupeKey: `business-task-pending:${task.id}`,
+      metadata: { taskId: task.id, taskType: task.type }
+    });
+  }
+  return { queued: true, existing: false, task };
+}
+
 function scheduleRemainingBookWork(state, { userId, book, plan, restartExisting = false, startAt = Date.now() }) {
   if (!plan) return;
   const core = (plan.sessions || []).filter((item) => item.isCore !== false);
@@ -79,7 +110,7 @@ function scheduleRemainingBookWork(state, { userId, book, plan, restartExisting 
   let queueIndex = 0;
   for (const item of core) {
     const existingSession = byNumber.get(item.number);
-    if (existingSession && !restartExisting && ['completed', 'delivered', 'scheduled'].includes(existingSession.status)) continue;
+    if (existingSession && !restartExisting && ['completed', 'delivered', 'scheduled', 'skipped'].includes(existingSession.status)) continue;
     const runAt = new Date(startAt + queueIndex * intervalMs).toISOString();
     queueIndex += 1;
     if (existingSession) {
@@ -268,6 +299,7 @@ export class BookLearningService {
   async addBook(userId, input = {}) {
     const user = this.store.read((state) => state.users[userId]);
     if (!user) throw new Error('User not found');
+    if (!this.businessActions) throw new Error('ChatGPT Business Actions service is unavailable');
     const title = clean(input.title, 300);
     const author = clean(input.author, 240);
     const isbn = clean(input.isbn, 40).replace(/[^0-9Xx]/g, '').toUpperCase();
@@ -275,13 +307,6 @@ export class BookLearningService {
     if (inputUrl && !/^https:\/\//.test(inputUrl)) throw new Error('Book URLs must use public HTTPS');
     if (!validIsbn(isbn)) throw new Error('ISBN must be a valid ISBN-10 or ISBN-13');
     if (!title && !isbn && !inputUrl) throw new Error('Enter a title, ISBN, or public HTTPS book URL');
-    const duplicate = this.store.read((state) => Object.values(state.books || {}).find((candidate) => candidate.userId === userId && (
-      (isbn && candidate.isbn === isbn) ||
-      (title && normalizeIdentifier(candidate.title) === normalizeIdentifier(title) && normalizeIdentifier(candidate.author) === normalizeIdentifier(author))
-    )));
-    if (duplicate) return { book: publicBook(duplicate), merged: true, queued: false };
-    const activeCount = this.store.read((state) => Object.values(state.books || {}).filter((candidate) => candidate.userId === userId && ACTIVE_BOOK_STATUSES.has(candidate.status)).length);
-    if (activeCount >= 3) throw new Error('A learner may have up to three active or pending books');
     const book = {
       id: uid('book'), userId, title: title || 'Book awaiting identification', author, isbn, inputUrl,
       edition: clean(input.edition, 160), language: clean(input.language || user.language, 20), bookType: 'nonfiction',
@@ -290,28 +315,33 @@ export class BookLearningService {
       progressPercent: 0, pace: 'standard', sessionPreference: 'balanced', notes: [], bookmarks: [], concepts: [], topicLinkSuggestions: [], analysisTaskId: null, lastAnalysisTaskId: null, analysisIntegrationError: null,
       createdAt: nowIso(), updatedAt: nowIso()
     };
-    await this.store.transaction((state) => {
+    return this.store.transaction((state) => {
       if (!state.users?.[userId]) throw new Error('User no longer exists');
       state.books ||= {};
+      const duplicate = Object.values(state.books).find((candidate) => candidate.userId === userId && (
+        (isbn && candidate.isbn === isbn) ||
+        (title && normalizeIdentifier(candidate.title) === normalizeIdentifier(title) && normalizeIdentifier(candidate.author) === normalizeIdentifier(author))
+      ));
+      if (duplicate) return { book: publicBook(duplicate), merged: true, queued: false };
+      const activeCount = Object.values(state.books).filter((candidate) => candidate.userId === userId && ACTIVE_BOOK_STATUSES.has(candidate.status)).length;
+      if (activeCount >= 3) throw new Error('A learner may have up to three active or pending books');
       state.books[book.id] = book;
-      return book;
+      const queued = queueBookAnalysisTask(state, { businessActions: this.businessActions, userId, bookId: book.id });
+      book.analysisTaskId = queued.task.id;
+      book.updatedAt = nowIso();
+      return { book: publicBook(book), merged: false, ...queued };
     });
-    const queued = await this.queueAnalysis(userId, book.id);
-    return { book, merged: false, ...queued };
   }
 
   async queueAnalysis(userId, bookId, { force = false } = {}) {
-    const book = this.getOwnedBook(userId, bookId);
     if (!this.businessActions) throw new Error('ChatGPT Business Actions service is unavailable');
+    return this.store.transaction((state) => {
+      const target = state.books?.[bookId];
+      if (!target || target.userId !== userId || !state.users?.[userId]) throw new Error('Book no longer exists');
+      const currentTask = target.analysisTaskId ? state.businessTasks?.[target.analysisTaskId] : null;
+      const existing = currentTask && ['pending', 'claimed'].includes(currentTask.status) ? currentTask : null;
+      if (existing && !force) return { queued: true, existing: true, task: existing };
 
-    const existing = this.store.read((state) => {
-      const currentId = state.books?.[bookId]?.analysisTaskId;
-      const task = currentId ? state.businessTasks?.[currentId] : null;
-      return task && ['pending', 'claimed'].includes(task.status) ? task : null;
-    });
-    if (existing && !force) return { queued: true, existing: true, task: existing };
-
-    await this.store.transaction((state) => {
       cancelBookJobs(state, bookId, { includeDelivery: true });
       for (const task of Object.values(state.businessTasks || {})) {
         if (task.type === 'book_analysis' && task.payload?.bookId === bookId && ['pending', 'claimed'].includes(task.status)) {
@@ -320,24 +350,17 @@ export class BookLearningService {
           task.updatedAt = nowIso();
         }
       }
-      const target = state.books[bookId];
-      if (!target || target.userId !== userId || !state.users?.[userId]) throw new Error('Book no longer exists');
       target.status = 'queued_analysis';
       target.sourceQuality = 'pending';
       target.sourceLimitations = [];
       target.analysisIntegrationError = null;
       target.analysisTaskId = null;
       target.updatedAt = nowIso();
-    });
-    const queued = await this.businessActions.queueBookAnalysis(userId, bookId);
-    await this.store.transaction((state) => {
-      const target = state.books[bookId];
-      if (!target || target.userId !== userId || !state.users?.[userId]) throw new Error('Book no longer exists');
-      target.analysisTaskId = queued.task?.id || queued.id || null;
+      const queued = queueBookAnalysisTask(state, { businessActions: this.businessActions, userId, bookId });
+      target.analysisTaskId = queued.task.id;
       target.updatedAt = nowIso();
-      return target;
+      return queued;
     });
-    return queued;
   }
 
   getOwnedBook(userId, bookId) {
@@ -515,6 +538,7 @@ export class BookLearningService {
       const session = state.bookSessions?.[sessionId];
       if (!session || session.userId !== userId) throw new Error('Book session not found');
       if (!['delivered', 'completed'].includes(session.status)) throw new Error('Book session is not available for reading yet');
+      if (session.status === 'completed') return session;
       session.resumePercent = clamp(Number(percent) || 0, 0, 99); session.updatedAt = nowIso(); return session;
     });
   }
@@ -552,8 +576,13 @@ export class BookLearningService {
       const book = state.books?.[bookId];
       if (!book || book.userId !== userId) throw new Error('Book not found');
       const plan = state.bookPlans?.[book.activePlanId];
-      if (action === 'pause') book.status = 'paused';
+      if (action === 'pause') {
+        if (book.status !== 'active') throw new Error('Only an active book can be paused');
+        book.status = 'paused';
+      }
       if (action === 'resume') {
+        if (book.status !== 'paused') throw new Error('Only a paused book can be resumed');
+        if (!plan || plan.status !== 'approved') throw new Error('An approved book plan is required before resuming');
         book.status = 'active';
         scheduleRemainingBookWork(state, { userId, book, plan, startAt: Date.now() });
       }
