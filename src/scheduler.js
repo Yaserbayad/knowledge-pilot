@@ -1,6 +1,23 @@
 import { nowIso } from './utils.js';
 import { queueSystemNotice } from './services/notices.js';
 
+const EXTERNAL_EFFECT_JOB_TYPES = new Set([
+  'deliver_lesson',
+  'deliver_book_session',
+  'notify_book_plan',
+  'send_reminder',
+  'send_book_reminder',
+  'send_reinforcement',
+  'send_book_reinforcement',
+  'send_direct_response',
+  'send_system_notice'
+]);
+
+function externalOutcomeUnknownMessage(type, error = '') {
+  const detail = error ? ` Last error: ${error}` : '';
+  return `External delivery outcome is unknown for ${type}; automatic retry is disabled to prevent duplicate sends.${detail}`;
+}
+
 export class Scheduler {
   constructor({ store, learning, books = null, delivery, config, logger }) {
     this.store = store;
@@ -42,6 +59,27 @@ export class Scheduler {
         for (const id of staleIds) {
           const job = state.jobs?.[id];
           if (!job || job.status !== 'running') continue;
+          if (EXTERNAL_EFFECT_JOB_TYPES.has(job.type) && job.externalEffectStartedAt && !job.externalEffectCompletedAt) {
+            job.status = 'failed';
+            job.startedAt = null;
+            job.ambiguousExternalEffect = true;
+            job.lastError = externalOutcomeUnknownMessage(job.type);
+            job.updatedAt = nowIso();
+            const user = state.users?.[job.userId];
+            if (job.type !== 'send_system_notice' && user?.automation?.notifyActionRequired !== false) {
+              queueSystemNotice(state, {
+                userId: job.userId,
+                kind: 'external_delivery_reconciliation_required',
+                title: 'Delivery needs reconciliation',
+                message: 'A messaging delivery was interrupted after sending may have started. Knowledge Pilot will not retry it automatically because that could send a duplicate.',
+                actionUrl: this.learning.accessUrl(user),
+                actionLabel: 'Open dashboard',
+                dedupeKey: `external-delivery-unknown:${job.id}`,
+                metadata: { jobId: job.id, jobType: job.type }
+              });
+            }
+            continue;
+          }
           job.status = 'pending';
           job.runAt = nowIso();
           job.startedAt = null;
@@ -61,6 +99,22 @@ export class Scheduler {
     } finally {
       this.running = false;
     }
+  }
+
+  async #markExternalEffectStarted(jobId) {
+    return this.store.transaction((state) => {
+      const target = state.jobs?.[jobId];
+      if (!target || target.status !== 'running') return false;
+      if (!target.externalEffectStartedAt) target.externalEffectStartedAt = nowIso();
+      target.updatedAt = nowIso();
+      return true;
+    });
+  }
+
+  async #runExternal(job, operation) {
+    const prepared = await this.#markExternalEffectStarted(job.id);
+    if (!prepared) return;
+    return operation();
   }
 
   async #runJob(job) {
@@ -117,7 +171,7 @@ export class Scheduler {
           });
           return;
         }
-        await this.delivery.deliverLesson(job.payload.lessonId);
+        await this.#runExternal(job, () => this.delivery.deliverLesson(job.payload.lessonId));
       } else if (job.type === 'deliver_book_session') {
         const deliveryContext = this.store.read((state) => {
           const session = state.bookSessions?.[job.payload.sessionId];
@@ -163,21 +217,21 @@ export class Scheduler {
           });
           return;
         }
-        await this.delivery.deliverBookSession(job.payload.sessionId);
+        await this.#runExternal(job, () => this.delivery.deliverBookSession(job.payload.sessionId));
       } else if (job.type === 'notify_book_plan') {
-        await this.delivery.notifyBookPlanReady(job.payload.bookId);
+        await this.#runExternal(job, () => this.delivery.notifyBookPlanReady(job.payload.bookId));
       } else if (job.type === 'send_reminder') {
-        await this.delivery.sendReminder(job.payload.lessonId);
+        await this.#runExternal(job, () => this.delivery.sendReminder(job.payload.lessonId));
       } else if (job.type === 'send_book_reminder') {
-        await this.delivery.sendBookReminder(job.payload.sessionId);
+        await this.#runExternal(job, () => this.delivery.sendBookReminder(job.payload.sessionId));
       } else if (job.type === 'send_reinforcement') {
-        await this.delivery.sendReinforcement(job.payload.lessonId, job.payload.questionId);
+        await this.#runExternal(job, () => this.delivery.sendReinforcement(job.payload.lessonId, job.payload.questionId));
       } else if (job.type === 'send_book_reinforcement') {
-        await this.delivery.sendBookReinforcement(job.payload.sessionId, job.payload.questionId);
+        await this.#runExternal(job, () => this.delivery.sendBookReinforcement(job.payload.sessionId, job.payload.questionId));
       } else if (job.type === 'send_direct_response') {
-        await this.delivery.sendDirectResponse(job.userId, job.payload.text, job.payload.origin, job.payload.interactionId);
+        await this.#runExternal(job, () => this.delivery.sendDirectResponse(job.userId, job.payload.text, job.payload.origin, job.payload.interactionId));
       } else if (job.type === 'send_system_notice') {
-        await this.delivery.sendSystemNotice(job.userId, job.payload);
+        await this.#runExternal(job, () => this.delivery.sendSystemNotice(job.userId, job.payload));
       } else if (job.type === 'backup') {
         await this.store.backup('job');
       } else {
@@ -188,6 +242,7 @@ export class Scheduler {
         if (target && target.status === 'running') {
           target.status = 'completed';
           target.completedAt = nowIso();
+          if (target.externalEffectStartedAt) target.externalEffectCompletedAt = target.completedAt;
           target.startedAt = null;
           target.updatedAt = nowIso();
         }
@@ -197,9 +252,31 @@ export class Scheduler {
       await this.store.transaction((state) => {
         const target = state.jobs[job.id];
         if (!target) return;
-        target.lastError = error.message;
         target.startedAt = null;
         target.updatedAt = nowIso();
+        const ambiguousExternalEffect = EXTERNAL_EFFECT_JOB_TYPES.has(target.type)
+          && target.externalEffectStartedAt
+          && !target.externalEffectCompletedAt;
+        if (ambiguousExternalEffect) {
+          target.status = 'failed';
+          target.ambiguousExternalEffect = true;
+          target.lastError = externalOutcomeUnknownMessage(target.type, error.message);
+          const user = state.users?.[target.userId];
+          if (target.type !== 'send_system_notice' && user?.automation?.notifyActionRequired !== false) {
+            queueSystemNotice(state, {
+              userId: target.userId,
+              kind: 'external_delivery_reconciliation_required',
+              title: 'Delivery needs reconciliation',
+              message: 'A messaging delivery failed after sending may have started. Knowledge Pilot will not retry it automatically because that could send a duplicate.',
+              actionUrl: this.learning.accessUrl(user),
+              actionLabel: 'Open dashboard',
+              dedupeKey: `external-delivery-unknown:${target.id}`,
+              metadata: { jobId: target.id, jobType: target.type }
+            });
+          }
+          return;
+        }
+        target.lastError = error.message;
         if (target.attempts >= this.config.maxAttempts) {
           target.status = 'failed';
           const user = state.users?.[target.userId];
