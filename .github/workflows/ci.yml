@@ -43,3 +43,56 @@ jobs:
         run: npm run check
       - name: Dependency audit
         run: npm audit --omit=dev --audit-level=high
+
+  release-tag:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: gate
+        name: Check one-time tag marker
+        run: |
+          if [ -f .github/release-tag-trigger ]; then
+            echo 'apply=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'apply=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Select audited release commit
+        if: steps.gate.outputs.apply == 'true'
+        run: |
+          git checkout --detach c4515246d9b78f07c9c8aec513e3eec64dd8bd21
+          test "$(cat VERSION)" = "1.4.2"
+          if git rev-parse -q --verify refs/tags/v1.4.2 >/dev/null; then
+            echo "v1.4.2 already exists; refusing to overwrite an immutable tag" >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.apply == 'true'
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Verify exact release application
+        if: steps.gate.outputs.apply == 'true'
+        run: |
+          npm ci --ignore-scripts
+          npm run check
+          npm audit --omit=dev --audit-level=high
+      - name: Verify exact release Workspace Agent
+        if: steps.gate.outputs.apply == 'true'
+        working-directory: automation/workspace-agent
+        run: |
+          npm ci --ignore-scripts
+          npm run check
+          npm audit --omit=dev --audit-level=high
+      - name: Create immutable release tag
+        if: steps.gate.outputs.apply == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          test "$(git rev-parse HEAD)" = "c4515246d9b78f07c9c8aec513e3eec64dd8bd21"
+          git tag -a v1.4.2 c4515246d9b78f07c9c8aec513e3eec64dd8bd21 -m 'Knowledge Pilot 1.4.2'
+          git push origin refs/tags/v1.4.2
