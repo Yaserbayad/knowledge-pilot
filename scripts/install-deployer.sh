@@ -6,6 +6,24 @@ DEPLOY_REPO="/opt/knowledgepilot-deploy"
 TARGET="/usr/local/sbin/deploy-knowledge-pilot"
 LOCK_FILE="/run/lock/knowledgepilot-deployer-install.lock"
 REPOSITORY_SLUG="Yaserbayad/knowledge-pilot"
+INSTALL_TEST_MODE=0
+
+configure_installer_paths() {
+  if [[ "${KNOWLEDGE_PILOT_INSTALLER_TEST_MODE:-0}" == "1" ]]; then
+    : "${KP_INSTALL_TEST_ROOT:?KP_INSTALL_TEST_ROOT is required in installer test mode}"
+    local resolved
+    resolved="$(readlink -m "$KP_INSTALL_TEST_ROOT")"
+    case "$resolved" in
+      /tmp/*|/var/tmp/*) ;;
+      *) printf 'Unsafe installer test root\n' >&2; return 1 ;;
+    esac
+    INSTALL_TEST_MODE=1
+    DEPLOY_REPO="$resolved/deploy-repo"
+    TARGET="$resolved/usr/local/sbin/deploy-knowledge-pilot"
+    LOCK_FILE="$resolved/install.lock"
+    TEST_NPMRC="$resolved/npmrc"
+  fi
+}
 
 usage() {
   printf 'Usage: sudo bash install-deployer.sh <40-character-engine-source-commit-sha>\n'
@@ -41,6 +59,10 @@ sanitize_npm_config_file() {
 }
 
 cleanup_stale_npm_config() {
+  if (( INSTALL_TEST_MODE == 1 )); then
+    sanitize_npm_config_file "$TEST_NPMRC"
+    return
+  fi
   command -v npm >/dev/null 2>&1 || return 0
   local user_config global_config file
   user_config="$(npm config get userconfig 2>/dev/null || true)"
@@ -56,6 +78,7 @@ cleanup_stale_npm_config() {
 verify_deploy_repo_origin() {
   local origin
   origin="$(git -C "$DEPLOY_REPO" remote get-url origin 2>/dev/null)" || return 1
+  (( INSTALL_TEST_MODE == 1 )) && return 0
   case "$origin" in
     git@github.com:${REPOSITORY_SLUG}|git@github.com:${REPOSITORY_SLUG}.git|ssh://git@github.com/${REPOSITORY_SLUG}|ssh://git@github.com/${REPOSITORY_SLUG}.git) return 0 ;;
     *) return 1 ;;
@@ -63,10 +86,11 @@ verify_deploy_repo_origin() {
 }
 
 main() {
+  configure_installer_paths || return 1
   [[ "$EUID" == "0" ]] || { printf 'Installer must run as root.\n' >&2; return 1; }
   [[ "$#" == "1" && "$1" =~ ^[0-9a-f]{40}$ ]] || { usage >&2; return 2; }
   local source_sha="$1" tmp installed_hash source_hash
-  for command in git bash install sha256sum flock stat awk sort mktemp mv mkdir dirname; do
+  for command in git bash install sha256sum flock stat awk sort mktemp mv mkdir dirname readlink; do
     command -v "$command" >/dev/null 2>&1 || { printf 'Missing required command: %s\n' "$command" >&2; return 1; }
   done
   [[ -d "$DEPLOY_REPO/.git" ]] || { printf 'Deployment repository is missing.\n' >&2; return 1; }
@@ -88,12 +112,17 @@ main() {
 
   cleanup_stale_npm_config
 
+  mkdir -p "$(dirname "$TARGET")"
   install -o root -g root -m 0755 "$tmp" "$TARGET.new"
   mv -f "$TARGET.new" "$TARGET"
   source_hash="$(sha256sum "$tmp" | awk '{print $1}')"
   installed_hash="$(sha256sum "$TARGET" | awk '{print $1}')"
   [[ "$installed_hash" == "$source_hash" ]] || { printf 'Installed deployer hash mismatch.\n' >&2; return 1; }
-  [[ "$(stat -c '%U:%G:%a' "$TARGET")" == "root:root:755" ]] || { printf 'Installed deployer permissions are invalid.\n' >&2; return 1; }
+  if (( INSTALL_TEST_MODE == 1 )); then
+    [[ "$(stat -c '%a' "$TARGET")" == "755" ]] || { printf 'Installed deployer permissions are invalid.\n' >&2; return 1; }
+  else
+    [[ "$(stat -c '%U:%G:%a' "$TARGET")" == "root:root:755" ]] || { printf 'Installed deployer permissions are invalid.\n' >&2; return 1; }
+  fi
   "$TARGET" --self-test >/dev/null
 
   printf 'INSTALL=PASS\n'
