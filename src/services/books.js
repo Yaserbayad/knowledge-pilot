@@ -19,6 +19,49 @@ function cleanList(value, max = 20, itemMax = 1000) {
   return Array.isArray(value) ? value.map((item) => clean(item, itemMax)).filter(Boolean).slice(0, max) : [];
 }
 
+function normalizeBookVerification(value, mode) {
+  const verification = value && typeof value === 'object' ? value : {};
+  const adversarialReview = verification.adversarialReview && typeof verification.adversarialReview === 'object'
+    ? verification.adversarialReview
+    : {};
+  const finalAudit = verification.finalAudit && typeof verification.finalAudit === 'object'
+    ? verification.finalAudit
+    : {};
+  const common = {
+    researchApproach: clean(verification.researchApproach, 3000),
+    sourceLimitations: cleanList(verification.sourceLimitations, 12, 1000),
+    adversarialReview: {
+      issuesFound: cleanList(adversarialReview.issuesFound, 12, 1000),
+      correctionsMade: cleanList(adversarialReview.correctionsMade, 12, 1000),
+      unresolvedIssues: cleanList(adversarialReview.unresolvedIssues, 12, 1000)
+    },
+    finalAudit: {
+      accuracyPassed: finalAudit.accuracyPassed === true,
+      sourceTraceabilityPassed: finalAudit.sourceTraceabilityPassed === true,
+      completenessPassed: finalAudit.completenessPassed === true,
+      learnerFitPassed: finalAudit.learnerFitPassed === true,
+      noFabricationPassed: finalAudit.noFabricationPassed === true
+    }
+  };
+  if (mode === 'analysis') {
+    return {
+      researchApproach: common.researchApproach,
+      editionConfidence: ['high', 'medium', 'low'].includes(verification.editionConfidence) ? verification.editionConfidence : 'low',
+      sourceLimitations: common.sourceLimitations,
+      adversarialReview: common.adversarialReview,
+      finalAudit: common.finalAudit
+    };
+  }
+  return {
+    researchApproach: common.researchApproach,
+    authorFaithfulness: clean(verification.authorFaithfulness, 3000),
+    criticismBasis: clean(verification.criticismBasis, 3000),
+    sourceLimitations: common.sourceLimitations,
+    adversarialReview: common.adversarialReview,
+    finalAudit: common.finalAudit
+  };
+}
+
 function normalizeIdentifier(value) {
   return clean(value, 300).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 }
@@ -141,6 +184,7 @@ export function normalizeBookAnalysis(raw, book, user) {
   const metadata = raw.metadata || {};
   const plan = raw.plan || {};
   const sessions = Array.isArray(plan.sessions) ? plan.sessions.slice(0, 36) : [];
+  if (raw && typeof raw === 'object') raw.verification = normalizeBookVerification(raw.verification, 'analysis');
   return {
     metadata: {
       title: clean(metadata.title || book.title, 300),
@@ -188,6 +232,7 @@ export function normalizeBookAnalysis(raw, book, user) {
 
 export function normalizeBookSession(raw, book, planItem, user, sources = []) {
   const content = raw.content || {};
+  if (raw && typeof raw === 'object') raw.verification = normalizeBookVerification(raw.verification, 'session');
   const annotations = new Map((Array.isArray(raw.sources) ? raw.sources : []).map((source) => [String(source.id || ''), source]));
   return {
     title: clean(raw.title || planItem.title, 300),
