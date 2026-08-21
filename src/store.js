@@ -98,7 +98,16 @@ export class JsonStore {
   async transaction(mutator) {
     const run = async () => {
       const draft = structuredClone(this.state);
+      const completedTasks = new Map(Object.values(this.state.businessTasks || {})
+        .filter((task) => task?.status === 'completed' && task.id)
+        .map((task) => [task.id, structuredClone(task)]));
       const result = await mutator(draft);
+      for (const [taskId, accepted] of completedTasks) {
+        const current = draft.businessTasks?.[taskId];
+        if (!current || current.status === 'completed') continue;
+        for (const key of Object.keys(current)) delete current[key];
+        Object.assign(current, structuredClone(accepted));
+      }
       draft.meta.updatedAt = nowIso();
       await this.persist(draft);
       this.state = draft;
