@@ -48,7 +48,7 @@ test('public health is minimal while still exposing release identity', async (t)
   assert.deepEqual(await response.json(), { ok: true, version: '1.4.1' });
 });
 
-test('responses include baseline security headers and production HSTS', async (t) => {
+test('responses include baseline security headers, strict CSP, and production HSTS', async (t) => {
   const { base } = await start(t);
   const response = await fetch(`${base}/health`);
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
@@ -56,6 +56,10 @@ test('responses include baseline security headers and production HSTS', async (t
   assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
   assert.match(response.headers.get('permissions-policy') || '', /camera=\(\)/);
   assert.match(response.headers.get('strict-transport-security') || '', /max-age=/);
+  const csp = response.headers.get('content-security-policy') || '';
+  assert.match(csp, /default-src 'self'/);
+  assert.match(csp, /script-src 'self'/);
+  assert.doesNotMatch(csp, /'unsafe-inline'/);
 });
 
 test('JSON request limit is enforced by UTF-8 bytes', async (t) => {
