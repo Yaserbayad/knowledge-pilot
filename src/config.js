@@ -3,7 +3,7 @@ import process from 'node:process';
 import { APP_VERSION } from './version.js';
 
 const ALLOWED_PROVIDERS = new Set(['chatgpt_business', 'mock', 'openai_compatible', 'ollama']);
-const ALLOWED_LANGUAGES = new Set(['ar', 'en']);
+const ALLOWED_LANGUAGES = new Set(['ar', 'en', 'nl']);
 
 function bool(name, fallback = false) {
   const value = process.env[name];
