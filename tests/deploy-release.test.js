@@ -29,6 +29,7 @@ function shellFunction(command) {
 test('deployment engine accepts only semantic release tags plus exact commit SHAs', async () => {
   await fs.access(deployScript);
   assert.equal(shellFunction(`validate_release_args v1.4.3 ${'a'.repeat(40)}`).status, 0);
+  assert.equal(shellFunction(`validate_release_args v1.5.0 ${'b'.repeat(40)}`).status, 0);
   assert.notEqual(shellFunction(`validate_release_args main ${'a'.repeat(40)}`).status, 0);
   assert.notEqual(shellFunction(`validate_release_args latest ${'a'.repeat(40)}`).status, 0);
   assert.notEqual(shellFunction('validate_release_args v1.4.3 deadbeef').status, 0);
@@ -59,6 +60,7 @@ test('engine encodes the permanent safety invariants and forbidden stop patterns
   assert.match(source, /--exclude=['"]?data\//);
   assert.match(source, /--exclude=['"]?\.well-known\//);
   assert.match(source, /runuser\s+-u\s+"?\$RUNTIME_USER"?\s+--\s+bash\s+"?\$AAPANEL_START_SCRIPT"?/);
+  assert.match(source, /\[\[ "\$target" == "\$AAPANEL_PID_FILE" \]\] && continue/);
   assert.match(source, /node\s+--input-type=module/);
   assert.match(source, /api\/gpt\/health/);
   assert.match(source, /gpt-action\/openapi\.json/);
@@ -79,6 +81,23 @@ test('engine verifies runtime facts after start instead of trusting start comman
   for (const marker of ['/proc/', 'cwd', 'cmdline', '127.0.0.1', 'RUNTIME_USER', 'VERSION', '/health']) {
     assert.ok(source.includes(marker), `missing runtime verification marker: ${marker}`);
   }
+});
+
+test('live stop becomes rollback-eligible before TERM can mutate production availability', async () => {
+  const source = await read(deployScript);
+  const liveStop = source.indexOf('phase LIVE_STOP');
+  const rollbackEligible = source.indexOf('CUTOVER_STARTED=1', liveStop);
+  const stopCall = source.indexOf('graceful_stop_application "$CURRENT_PID"', liveStop);
+  assert.ok(liveStop >= 0);
+  assert.ok(rollbackEligible > liveStop, 'rollback eligibility must be set inside LIVE_STOP');
+  assert.ok(stopCall > rollbackEligible, 'rollback eligibility must be set before sending TERM');
+});
+
+test('workspace-agent topology changes fail closed as deployment-architecture changes', () => {
+  assert.equal(shellFunction('workspace_agent_topology_matches 1 1').status, 0);
+  assert.equal(shellFunction('workspace_agent_topology_matches 0 0').status, 0);
+  assert.notEqual(shellFunction('workspace_agent_topology_matches 1 0').status, 0);
+  assert.notEqual(shellFunction('workspace_agent_topology_matches 0 1').status, 0);
 });
 
 test('one-time installer is source-controlled, atomic, syntax-checks and self-tests the installed engine', async () => {
@@ -154,7 +173,7 @@ async function makeFixture() {
   await markRunning();
   await writeExecutable(path.join(scriptDir, 'knowledgepilot.sh'), `#!/usr/bin/env bash\ncd "${live}"\nnohup node src/index.js >/dev/null 2>&1 &\n`);
 
-  await writeExecutable(path.join(bin, 'npm'), '#!/usr/bin/env bash\nprintf "npm %s\\n" "$*" >> "$KP_TEST_ROOT/commands.log"\nexit 0\n');
+  await writeExecutable(path.join(bin, 'npm'), '#!/usr/bin/env bash\nprintf "npm %s\\n" "$*" >> "$KP_TEST_ROOT/commands.log"\nif [ -n "${KP_TEST_NPM_FAIL_MATCH:-}" ] && [[ "$*" == *"$KP_TEST_NPM_FAIL_MATCH"* ]]; then exit 42; fi\nexit 0\n');
   await writeExecutable(path.join(bin, 'ss'), '#!/usr/bin/env bash\nif [ -f "$KP_TEST_ROOT/runtime/running" ]; then pid=$(cat "$KP_TEST_ROOT/runtime/running"); printf "LISTEN 0 511 127.0.0.1:3100 0.0.0.0:* users:((\\\"node\\\",pid=%s,fd=20))\\n" "$pid"; fi\n');
   await writeExecutable(path.join(bin, 'runuser'), `#!/usr/bin/env bash\nset -e\nif [ "$1" = "-u" ] && [ "$3" = "--" ] && [ "$4" = "test" ]; then exit 0; fi\nif [ "$1" = "-u" ] && [ "$3" = "--" ] && [ "$4" = "bash" ]; then\n  pid=4242\n  mkdir -p "$KP_TEST_ROOT/proc/$pid"\n  rm -f "$KP_TEST_ROOT/proc/$pid/cwd"\n  ln -s "$KP_TEST_ROOT/live" "$KP_TEST_ROOT/proc/$pid/cwd"\n  printf '/usr/bin/node\\0src/index.js\\0' > "$KP_TEST_ROOT/proc/$pid/cmdline"\n  printf 'Name:\\tnode\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\n' > "$KP_TEST_ROOT/proc/$pid/status"\n  printf '%s\\n' "$pid" > "$KP_TEST_ROOT/runtime/running"\n  cat "$KP_TEST_ROOT/live/VERSION" > "$KP_TEST_ROOT/runtime/version"\n  printf '%s\\n' "$pid" > "$KP_TEST_ROOT/aapanel/pids/knowledgepilot.pid"\n  exit 0\nfi\nexit 1\n`);
   await writeExecutable(path.join(bin, 'curl'), `#!/usr/bin/env bash\nset -e\nurl="\${@: -1}"\nversion=$(cat "$KP_TEST_ROOT/live/VERSION")\nif [[ "$url" == https://* ]] && [ "\${KP_TEST_FAIL_EXTERNAL_ON_VERSION:-}" = "$version" ]; then exit 22; fi\ncase "$url" in\n  */gpt-action/openapi.json) printf '{"info":{"version":"%s"}}\\n' "$version" ;;\n  *) printf '{"ok":true,"version":"%s"}\\n' "$version" ;;\nesac\n`);
@@ -162,13 +181,14 @@ async function makeFixture() {
   return { root, live, stage, rollback, deployRepo, bin, sha };
 }
 
-async function runSimulation({ failExternal = false } = {}) {
+async function runSimulation({ failExternal = false, failStage = false } = {}) {
   const fixture = await makeFixture();
   const result = run('bash', [deployScript, 'v1.4.3', fixture.sha], {
     env: {
       KNOWLEDGE_PILOT_DEPLOY_TEST_MODE: '1',
       KP_TEST_ROOT: fixture.root,
       KP_TEST_FAIL_EXTERNAL_ON_VERSION: failExternal ? '1.4.3' : '',
+      KP_TEST_NPM_FAIL_MATCH: failStage ? 'ci --ignore-scripts' : '',
       PATH: `${fixture.bin}:${process.env.PATH}`
     }
   });
@@ -181,11 +201,22 @@ test('disposable simulation performs a generic cutover while preserving runtime-
   assert.match(result.stdout, /RESULT=PASS/);
   assert.match(result.stdout, /RELEASE=v1\.4\.3/);
   assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /SUPER-SECRET-SENTINEL|ANOTHER-SECRET-SENTINEL/);
-  assert.equal((await fs.readFile(path.join(live, '.env'), 'utf8')).includes('SUPER-SECRET-SENTINEL'), true);
+  assert.equal(await fs.readFile(path.join(live, '.env'), 'utf8'), 'APP_SECRET=SUPER-SECRET-SENTINEL\nGPT_ACTION_API_KEY=ANOTHER-SECRET-SENTINEL\nAPP_BASE_URL=https://example.invalid\n');
   assert.equal(await fs.readFile(path.join(live, 'data', 'state.json'), 'utf8'), '{"preserve":true}\n');
   assert.equal(await fs.readFile(path.join(live, '.well-known', 'acme.txt'), 'utf8'), 'server-owned\n');
   await assert.rejects(fs.access(path.join(live, 'stale-release-file.txt')));
   assert.equal(await fs.readFile(path.join(live, 'new-release-file.txt'), 'utf8'), 'new\n');
+});
+
+test('pre-cutover staging failure leaves the running release-owned tree untouched', async () => {
+  const { live, result } = await runSimulation({ failStage: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /FAILED_PHASE=STAGE_VERIFY/);
+  assert.doesNotMatch(result.stdout, /ROLLBACK=PASS/);
+  assert.equal((await fs.readFile(path.join(live, 'VERSION'), 'utf8')).trim(), '1.4.2');
+  assert.equal(await fs.readFile(path.join(live, 'src', 'index.js'), 'utf8'), 'old release\n');
+  assert.equal(await fs.readFile(path.join(live, 'stale-release-file.txt'), 'utf8'), 'must disappear\n');
+  assert.equal(await fs.readFile(path.join(live, '.env'), 'utf8'), 'APP_SECRET=SUPER-SECRET-SENTINEL\nGPT_ACTION_API_KEY=ANOTHER-SECRET-SENTINEL\nAPP_BASE_URL=https://example.invalid\n');
 });
 
 test('post-cutover simulation failure automatically restores and verifies the prior release', async () => {
