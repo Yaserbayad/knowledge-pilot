@@ -8,6 +8,7 @@ import { AiService } from '../src/services/ai.js';
 import { LearningService } from '../src/services/learning.js';
 import { BusinessActionsService } from '../src/services/business-actions.js';
 import { createServer } from '../src/server.js';
+import { APP_VERSION } from '../src/version.js';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -35,7 +36,7 @@ test('GPT Action schema is public while task APIs require the configured bearer 
   assert.equal(schemaResponse.status, 200);
   const schema = await schemaResponse.json();
   assert.equal(schema.openapi, '3.1.0');
-  assert.equal(schema.info.version, '1.4.1');
+  assert.equal(schema.info.version, APP_VERSION);
   assert.ok(schema.paths['/api/gpt/tasks/{taskId}/result']);
 
   const visitSchema = (node, location = 'root') => {
