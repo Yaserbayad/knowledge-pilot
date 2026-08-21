@@ -7,6 +7,12 @@ export function taskFingerprint(tasks) {
     .slice(0, 32);
 }
 
+export function canDeclareQueueEmpty(state, tasks) {
+  return (!Array.isArray(tasks) || tasks.length === 0)
+    && !state?.activeRun
+    && !state?.triggerIntent;
+}
+
 function triggerInput(tasks, maxTasks) {
   const types = [...new Set((Array.isArray(tasks) ? tasks : []).slice(0, maxTasks).map((task) => task.type))];
   return [
