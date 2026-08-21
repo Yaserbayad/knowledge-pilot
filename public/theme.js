@@ -24,7 +24,6 @@
   function applyTheme(theme, persist = true) {
     const normalized = theme === 'dark' ? 'dark' : 'light';
     root.dataset.theme = normalized;
-    root.style.colorScheme = normalized;
     if (persist) localStorage.setItem(STORAGE_KEY, normalized);
     updateControls(normalized);
   }
