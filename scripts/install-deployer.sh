@@ -29,12 +29,16 @@ usage() {
   printf 'Usage: sudo bash install-deployer.sh <40-character-engine-source-commit-sha>\n'
 }
 
-sanitize_npm_config_file() {
+sanitize_npm_config_file() (
+  set -Eeuo pipefail
   local file="$1"
   [[ -f "$file" ]] || return 0
   local tmp removed mode uid gid
   tmp="$(mktemp)"
   removed="$(mktemp)"
+  # The source npm config can contain secrets. Keep temporary copies private
+  # and guarantee their deletion even if rewriting the config fails.
+  trap 'rm -f "$tmp" "$removed"' EXIT
   awk -F= -v removed="$removed" '
     {
       key=$1
@@ -50,13 +54,18 @@ sanitize_npm_config_file() {
     mode="$(stat -c '%a' "$file")"
     uid="$(stat -c '%u' "$file")"
     gid="$(stat -c '%g' "$file")"
-    install -o "$uid" -g "$gid" -m "$mode" "$tmp" "$file"
+    if [[ "$EUID" == "0" ]]; then
+      install -o "$uid" -g "$gid" -m "$mode" "$tmp" "$file"
+    else
+      # Non-root operation is available only to the /tmp-confined disposable
+      # test path; production installation itself remains root-only.
+      install -m "$mode" "$tmp" "$file"
+    fi
     while IFS= read -r key; do
       printf 'NPM_CONFIG_CLEANUP=REMOVED PATH=%s KEY=%s\n' "$file" "$key"
     done < <(sort -u "$removed")
   fi
-  rm -f "$tmp" "$removed"
-}
+)
 
 cleanup_stale_npm_config() {
   if (( INSTALL_TEST_MODE == 1 )); then
@@ -87,7 +96,9 @@ verify_deploy_repo_origin() {
 
 main() {
   configure_installer_paths || return 1
-  [[ "$EUID" == "0" ]] || { printf 'Installer must run as root.\n' >&2; return 1; }
+  if (( INSTALL_TEST_MODE == 0 )); then
+    [[ "$EUID" == "0" ]] || { printf 'Installer must run as root.\n' >&2; return 1; }
+  fi
   [[ "$#" == "1" && "$1" =~ ^[0-9a-f]{40}$ ]] || { usage >&2; return 2; }
   local source_sha="$1" tmp installed_hash source_hash
   for command in git bash install sha256sum flock stat awk sort mktemp mv mkdir dirname readlink; do
@@ -113,7 +124,11 @@ main() {
   cleanup_stale_npm_config
 
   mkdir -p "$(dirname "$TARGET")"
-  install -o root -g root -m 0755 "$tmp" "$TARGET.new"
+  if (( INSTALL_TEST_MODE == 1 )); then
+    install -m 0755 "$tmp" "$TARGET.new"
+  else
+    install -o root -g root -m 0755 "$tmp" "$TARGET.new"
+  fi
   mv -f "$TARGET.new" "$TARGET"
   source_hash="$(sha256sum "$tmp" | awk '{print $1}')"
   installed_hash="$(sha256sum "$TARGET" | awk '{print $1}')"
