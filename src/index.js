@@ -43,7 +43,7 @@ const businessActions = new BusinessActionsService({ store, research, learning, 
 learning.setBusinessActions(businessActions);
 books.setBusinessActions(businessActions);
 const telegram = new TelegramChannel({ config: { ...config.telegram, appSecret: config.appSecret, cardDir: config.cardDir }, store, learning, books, logger });
-const whatsapp = new WhatsAppChannel({ config: { ...config.whatsapp, cardDir: config.cardDir }, store, learning, books, logger });
+const whatsapp = new WhatsAppChannel({ config: { ...config.whatsapp, appSecret: config.appSecret, cardDir: config.cardDir }, store, learning, books, logger });
 const delivery = new DeliveryService({ store, learning, books, telegram, whatsapp, config, logger });
 const scheduler = new Scheduler({ store, learning, books, delivery, config: { ...config.scheduler, unfinishedItemLimit: config.automation.unfinishedItemLimit }, logger });
 
