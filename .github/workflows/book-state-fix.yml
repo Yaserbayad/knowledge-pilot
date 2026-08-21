@@ -1,0 +1,300 @@
+name: Apply verified book-state fix
+
+on:
+  push:
+    branches: [fix/book-state-atomicity]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[book-state-fix]') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Apply exact source transformations
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one source match, found {count}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once('src/services/business-actions.js', r'''  async queue(type, userId, payload = {}, options = {}) {
+            if (!TASK_TYPES.has(type)) throw new Error(`Unsupported Business task type: ${type}`);
+            const user = this.store.read((state) => state.users[userId]);
+            if (!user) throw new Error('User not found');
+            const dedupeKey = options.dedupeKey || `${type}:${userId}:${payload.planId || ''}:${payload.proposalId || ''}:${payload.bookId || ''}:${payload.sessionNumber || ''}:${payload.interactionId || ''}`;
+            return this.store.transaction((state) => {
+              if (!state.users?.[userId]) throw new Error('User no longer exists');
+              const existing = Object.values(state.businessTasks || {}).find((task) => task.dedupeKey === dedupeKey && ['pending', 'claimed'].includes(task.status));
+              if (existing) return { queued: true, existing: true, task: existing };
+              const task = {
+                id: uid('btask'), type, userId, payload, dedupeKey, priority: Number(options.priority) || 50,
+                status: 'pending', claimedAt: null, completedAt: null, attempts: 0, resultRef: null, error: null,
+                createdAt: nowIso(), updatedAt: nowIso()
+              };
+              state.businessTasks ||= {}; state.businessTasks[task.id] = task;
+              const shouldNotify = this.config.notifyPendingTasks !== false
+                && user.automation?.notifyActionRequired !== false
+                && ['weekly_plan', 'lesson', 'book_analysis', 'book_session', 'book_finale'].includes(type);
+              if (shouldNotify) {
+                queueSystemNotice(state, {
+                  userId,
+                  kind: 'processing_required',
+                  title: 'Verified processing is waiting',
+                  message: `A ${taskTypeLabel(type)} is queued and waiting for the Knowledge Pilot custom GPT to process it.`,
+                  actionUrl: this.config.customGptUrl || this.learning.accessUrl(user),
+                  actionLabel: this.config.customGptUrl ? 'Open Knowledge Pilot GPT' : 'Open dashboard',
+                  dedupeKey: `business-task-pending:${task.id}`,
+                  metadata: { taskId: task.id, taskType: type }
+                });
+              }
+              return { queued: true, existing: false, task };
+            });
+          }
+''', r'''  queueInState(state, type, userId, payload = {}, options = {}) {
+            if (!TASK_TYPES.has(type)) throw new Error(`Unsupported Business task type: ${type}`);
+            const user = state.users?.[userId];
+            if (!user) throw new Error('User no longer exists');
+            const dedupeKey = options.dedupeKey || `${type}:${userId}:${payload.planId || ''}:${payload.proposalId || ''}:${payload.bookId || ''}:${payload.sessionNumber || ''}:${payload.interactionId || ''}`;
+            const existing = Object.values(state.businessTasks || {}).find((task) => task.dedupeKey === dedupeKey && ['pending', 'claimed'].includes(task.status));
+            if (existing) return { queued: true, existing: true, task: existing };
+            const task = {
+              id: uid('btask'), type, userId, payload, dedupeKey, priority: Number(options.priority) || 50,
+              status: 'pending', claimedAt: null, completedAt: null, attempts: 0, resultRef: null, error: null,
+              createdAt: nowIso(), updatedAt: nowIso()
+            };
+            state.businessTasks ||= {}; state.businessTasks[task.id] = task;
+            const shouldNotify = this.config.notifyPendingTasks !== false
+              && user.automation?.notifyActionRequired !== false
+              && ['weekly_plan', 'lesson', 'book_analysis', 'book_session', 'book_finale'].includes(type);
+            if (shouldNotify) {
+              queueSystemNotice(state, {
+                userId,
+                kind: 'processing_required',
+                title: 'Verified processing is waiting',
+                message: `A ${taskTypeLabel(type)} is queued and waiting for the Knowledge Pilot custom GPT to process it.`,
+                actionUrl: this.config.customGptUrl || this.learning.accessUrl(user),
+                actionLabel: this.config.customGptUrl ? 'Open Knowledge Pilot GPT' : 'Open dashboard',
+                dedupeKey: `business-task-pending:${task.id}`,
+                metadata: { taskId: task.id, taskType: type }
+              });
+            }
+            return { queued: true, existing: false, task };
+          }
+
+          async queue(type, userId, payload = {}, options = {}) {
+            return this.store.transaction((state) => this.queueInState(state, type, userId, payload, options));
+          }
+''')
+
+          replace_once('src/services/books.js', r'''  async addBook(userId, input = {}) {
+            const user = this.store.read((state) => state.users[userId]);
+            if (!user) throw new Error('User not found');
+            const title = clean(input.title, 300);
+            const author = clean(input.author, 240);
+            const isbn = clean(input.isbn, 40).replace(/[^0-9Xx]/g, '').toUpperCase();
+            const inputUrl = clean(input.url, 1200);
+            if (inputUrl && !/^https:\/\//.test(inputUrl)) throw new Error('Book URLs must use public HTTPS');
+            if (!validIsbn(isbn)) throw new Error('ISBN must be a valid ISBN-10 or ISBN-13');
+            if (!title && !isbn && !inputUrl) throw new Error('Enter a title, ISBN, or public HTTPS book URL');
+            const duplicate = this.store.read((state) => Object.values(state.books || {}).find((candidate) => candidate.userId === userId && (
+              (isbn && candidate.isbn === isbn) ||
+              (title && normalizeIdentifier(candidate.title) === normalizeIdentifier(title) && normalizeIdentifier(candidate.author) === normalizeIdentifier(author))
+            )));
+            if (duplicate) return { book: publicBook(duplicate), merged: true, queued: false };
+            const activeCount = this.store.read((state) => Object.values(state.books || {}).filter((candidate) => candidate.userId === userId && ACTIVE_BOOK_STATUSES.has(candidate.status)).length);
+            if (activeCount >= 3) throw new Error('A learner may have up to three active or pending books');
+            const book = {
+              id: uid('book'), userId, title: title || 'Book awaiting identification', author, isbn, inputUrl,
+              edition: clean(input.edition, 160), language: clean(input.language || user.language, 20), bookType: 'nonfiction',
+              coverUrl: '', description: '', publishedYear: null, publisher: '', status: 'queued_analysis', sourceQuality: 'pending',
+              sourceLimitations: [], analysisSources: [], ownedCopy: null, activePlanId: null, currentSessionNumber: 0,
+              progressPercent: 0, pace: 'standard', sessionPreference: 'balanced', notes: [], bookmarks: [], concepts: [], topicLinkSuggestions: [], analysisTaskId: null, lastAnalysisTaskId: null, analysisIntegrationError: null,
+              createdAt: nowIso(), updatedAt: nowIso()
+            };
+            await this.store.transaction((state) => {
+              if (!state.users?.[userId]) throw new Error('User no longer exists');
+              state.books ||= {};
+              state.books[book.id] = book;
+              return book;
+            });
+            const queued = await this.queueAnalysis(userId, book.id);
+            return { book, merged: false, ...queued };
+          }
+
+          async queueAnalysis(userId, bookId, { force = false } = {}) {
+            const book = this.getOwnedBook(userId, bookId);
+            if (!this.businessActions) throw new Error('ChatGPT Business Actions service is unavailable');
+
+            const existing = this.store.read((state) => {
+              const currentId = state.books?.[bookId]?.analysisTaskId;
+              const task = currentId ? state.businessTasks?.[currentId] : null;
+              return task && ['pending', 'claimed'].includes(task.status) ? task : null;
+            });
+            if (existing && !force) return { queued: true, existing: true, task: existing };
+
+            await this.store.transaction((state) => {
+              cancelBookJobs(state, bookId, { includeDelivery: true });
+              for (const task of Object.values(state.businessTasks || {})) {
+                if (task.type === 'book_analysis' && task.payload?.bookId === bookId && ['pending', 'claimed'].includes(task.status)) {
+                  task.status = 'superseded';
+                  task.error = 'Superseded by a newer book-analysis request.';
+                  task.updatedAt = nowIso();
+                }
+              }
+              const target = state.books[bookId];
+              if (!target || target.userId !== userId || !state.users?.[userId]) throw new Error('Book no longer exists');
+              target.status = 'queued_analysis';
+              target.sourceQuality = 'pending';
+              target.sourceLimitations = [];
+              target.analysisIntegrationError = null;
+              target.analysisTaskId = null;
+              target.updatedAt = nowIso();
+            });
+            const queued = await this.businessActions.queueBookAnalysis(userId, bookId);
+            await this.store.transaction((state) => {
+              const target = state.books[bookId];
+              if (!target || target.userId !== userId || !state.users?.[userId]) throw new Error('Book no longer exists');
+              target.analysisTaskId = queued.task?.id || queued.id || null;
+              target.updatedAt = nowIso();
+              return target;
+            });
+            return queued;
+          }
+''', r'''  async addBook(userId, input = {}) {
+            const user = this.store.read((state) => state.users[userId]);
+            if (!user) throw new Error('User not found');
+            if (!this.businessActions) throw new Error('ChatGPT Business Actions service is unavailable');
+            const title = clean(input.title, 300);
+            const author = clean(input.author, 240);
+            const isbn = clean(input.isbn, 40).replace(/[^0-9Xx]/g, '').toUpperCase();
+            const inputUrl = clean(input.url, 1200);
+            if (inputUrl && !/^https:\/\//.test(inputUrl)) throw new Error('Book URLs must use public HTTPS');
+            if (!validIsbn(isbn)) throw new Error('ISBN must be a valid ISBN-10 or ISBN-13');
+            if (!title && !isbn && !inputUrl) throw new Error('Enter a title, ISBN, or public HTTPS book URL');
+            const book = {
+              id: uid('book'), userId, title: title || 'Book awaiting identification', author, isbn, inputUrl,
+              edition: clean(input.edition, 160), language: clean(input.language || user.language, 20), bookType: 'nonfiction',
+              coverUrl: '', description: '', publishedYear: null, publisher: '', status: 'queued_analysis', sourceQuality: 'pending',
+              sourceLimitations: [], analysisSources: [], ownedCopy: null, activePlanId: null, currentSessionNumber: 0,
+              progressPercent: 0, pace: 'standard', sessionPreference: 'balanced', notes: [], bookmarks: [], concepts: [], topicLinkSuggestions: [], analysisTaskId: null, lastAnalysisTaskId: null, analysisIntegrationError: null,
+              createdAt: nowIso(), updatedAt: nowIso()
+            };
+            return this.store.transaction((state) => {
+              if (!state.users?.[userId]) throw new Error('User no longer exists');
+              state.books ||= {};
+              const duplicate = Object.values(state.books).find((candidate) => candidate.userId === userId && (
+                (isbn && candidate.isbn === isbn) ||
+                (title && normalizeIdentifier(candidate.title) === normalizeIdentifier(title) && normalizeIdentifier(candidate.author) === normalizeIdentifier(author))
+              ));
+              if (duplicate) return { book: publicBook(duplicate), merged: true, queued: false };
+              const activeCount = Object.values(state.books).filter((candidate) => candidate.userId === userId && ACTIVE_BOOK_STATUSES.has(candidate.status)).length;
+              if (activeCount >= 3) throw new Error('A learner may have up to three active or pending books');
+              state.books[book.id] = book;
+              const queued = this.businessActions.queueInState(state, 'book_analysis', userId, { bookId: book.id }, { dedupeKey: `book_analysis:${book.id}:active`, priority: 95 });
+              book.analysisTaskId = queued.task.id;
+              book.updatedAt = nowIso();
+              return { book: publicBook(book), merged: false, ...queued };
+            });
+          }
+
+          async queueAnalysis(userId, bookId, { force = false } = {}) {
+            if (!this.businessActions) throw new Error('ChatGPT Business Actions service is unavailable');
+            return this.store.transaction((state) => {
+              const target = state.books?.[bookId];
+              if (!target || target.userId !== userId || !state.users?.[userId]) throw new Error('Book no longer exists');
+              const currentTask = target.analysisTaskId ? state.businessTasks?.[target.analysisTaskId] : null;
+              const existing = currentTask && ['pending', 'claimed'].includes(currentTask.status) ? currentTask : null;
+              if (existing && !force) return { queued: true, existing: true, task: existing };
+
+              cancelBookJobs(state, bookId, { includeDelivery: true });
+              for (const task of Object.values(state.businessTasks || {})) {
+                if (task.type === 'book_analysis' && task.payload?.bookId === bookId && ['pending', 'claimed'].includes(task.status)) {
+                  task.status = 'superseded';
+                  task.error = 'Superseded by a newer book-analysis request.';
+                  task.updatedAt = nowIso();
+                }
+              }
+              target.status = 'queued_analysis';
+              target.sourceQuality = 'pending';
+              target.sourceLimitations = [];
+              target.analysisIntegrationError = null;
+              target.analysisTaskId = null;
+              target.updatedAt = nowIso();
+              const queued = this.businessActions.queueInState(state, 'book_analysis', userId, { bookId }, { dedupeKey: `book_analysis:${bookId}:active`, priority: 95 });
+              target.analysisTaskId = queued.task.id;
+              target.updatedAt = nowIso();
+              return queued;
+            });
+          }
+''')
+
+          replace_once('src/services/books.js', "if (existingSession && !restartExisting && ['completed', 'delivered', 'scheduled'].includes(existingSession.status)) continue;", "if (existingSession && !restartExisting && ['completed', 'delivered', 'scheduled', 'skipped'].includes(existingSession.status)) continue;")
+
+          replace_once('src/services/books.js', r'''      if (!['delivered', 'completed'].includes(session.status)) throw new Error('Book session is not available for reading yet');
+                session.resumePercent = clamp(Number(percent) || 0, 0, 99); session.updatedAt = nowIso(); return session;
+''', r'''      if (!['delivered', 'completed'].includes(session.status)) throw new Error('Book session is not available for reading yet');
+                if (session.status === 'completed') return session;
+                session.resumePercent = clamp(Number(percent) || 0, 0, 99); session.updatedAt = nowIso(); return session;
+''')
+
+          replace_once('src/services/books.js', r'''      const plan = state.bookPlans?.[book.activePlanId];
+                if (action === 'pause') book.status = 'paused';
+                if (action === 'resume') {
+                  book.status = 'active';
+                  scheduleRemainingBookWork(state, { userId, book, plan, startAt: Date.now() });
+                }
+''', r'''      const plan = state.bookPlans?.[book.activePlanId];
+                if (action === 'pause') {
+                  if (book.status !== 'active') throw new Error('Only an active book can be paused');
+                  book.status = 'paused';
+                }
+                if (action === 'resume') {
+                  if (book.status !== 'paused') throw new Error('Only a paused book can be resumed');
+                  if (!plan || plan.status !== 'approved') throw new Error('An approved book plan is required before resuming');
+                  book.status = 'active';
+                  scheduleRemainingBookWork(state, { userId, book, plan, startAt: Date.now() });
+                }
+''')
+          PY
+      - name: Verify exact diff scope
+        run: |
+          git diff --check
+          git diff --name-only
+          test "$(git diff --name-only | sort | tr '\n' ' ')" = "src/services/books.js src/services/business-actions.js "
+      - name: Install root dependencies
+        run: npm ci --ignore-scripts
+      - name: Verify root application
+        run: npm run check
+      - name: Audit root production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Install workspace dependencies
+        working-directory: automation/workspace-agent
+        run: npm ci --ignore-scripts
+      - name: Verify Workspace Agent
+        working-directory: automation/workspace-agent
+        run: npm run check
+      - name: Audit Workspace Agent production dependencies
+        working-directory: automation/workspace-agent
+        run: npm audit --omit=dev --audit-level=high
+      - name: Commit verified source changes and remove temporary workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/services/books.js src/services/business-actions.js
+          git rm .github/workflows/book-state-fix.yml
+          git diff --cached --check
+          git commit -m 'fix: make book lifecycle transitions atomic [book-state-fix]'
+          git push origin HEAD:fix/book-state-atomicity
