@@ -1,0 +1,50 @@
+name: Workspace dependency lock refresh
+
+on:
+  push:
+    branches: [chore/workspace-dependency-refresh]
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: ${{ !contains(github.event.head_commit.message, '[lock-refresh]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: automation/workspace-agent/package-lock.json
+      - name: Add exact patched transitive overrides
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const file = 'automation/workspace-agent/package.json';
+          const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+          pkg.overrides = { ...(pkg.overrides || {}), 'fast-uri': '3.1.5', hono: '4.12.34' };
+          fs.writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+      - name: Regenerate lock with npm 11
+        working-directory: automation/workspace-agent
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Verify clean locked install
+        working-directory: automation/workspace-agent
+        run: npm ci --ignore-scripts
+      - name: Verify Workspace Agent
+        working-directory: automation/workspace-agent
+        run: npm run check
+      - name: Verify production dependency audit
+        working-directory: automation/workspace-agent
+        run: npm audit --omit=dev --audit-level=high
+      - name: Commit only verified dependency metadata
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add automation/workspace-agent/package.json automation/workspace-agent/package-lock.json
+          git rm .github/workflows/workspace-dependency-refresh.yml
+          git diff --cached --check
+          git commit -m 'chore: pin patched workspace transitive dependencies [lock-refresh]'
+          git push origin HEAD:chore/workspace-dependency-refresh
