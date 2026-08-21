@@ -168,9 +168,10 @@ export class LearningService {
   bindingLinks(user) {
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
     const telegramToken = createBindingToken(this.config.appSecret, user.id, 'telegram', expiresAt);
+    const whatsappToken = createBindingToken(this.config.appSecret, user.id, 'whatsapp', expiresAt);
     return {
       telegramToken,
-      whatsappCode: user.whatsappLinkCode,
+      whatsappCode: whatsappToken,
       whatsappNumber: this.config.whatsapp.dedicatedNumber
     };
   }
