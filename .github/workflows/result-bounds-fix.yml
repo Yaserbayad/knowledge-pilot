@@ -1,4 +1,4 @@
-name: Apply verified result bounds fix
+name: Apply verified learning bounds fix
 
 on:
   pull_request:
@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   patch-and-verify:
-    if: ${{ github.head_ref == 'fix/model-output-bounds' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.head_ref == 'fix/verification-bounds' && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +19,7 @@ jobs:
       - id: gate
         name: Check one-time trigger
         run: |
-          if [ -f .github/result-bounds-trigger ]; then
+          if [ -f .github/verification-bounds-trigger ]; then
             echo 'apply=true' >> "$GITHUB_OUTPUT"
           else
             echo 'apply=false' >> "$GITHUB_OUTPUT"
@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      - name: Apply bounded normalization block
+      - name: Apply bounded learning normalization block
         if: steps.gate.outputs.apply == 'true'
         run: |
           python3 - <<'PY'
@@ -49,8 +49,48 @@ jobs:
               : [];
           }
 
+          function normalizePlanVerification(value) {
+            const verification = value && typeof value === 'object' ? value : {};
+            return {
+              learnerFit: boundedText(verification.learnerFit, 2000),
+              noveltyCheck: boundedText(verification.noveltyCheck, 2000),
+              coherenceCheck: boundedText(verification.coherenceCheck, 2000)
+            };
+          }
+
+          function normalizeLessonVerification(value) {
+            const verification = value && typeof value === 'object' ? value : {};
+            const adversarialReview = verification.adversarialReview && typeof verification.adversarialReview === 'object'
+              ? verification.adversarialReview
+              : {};
+            const finalAudit = verification.finalAudit && typeof verification.finalAudit === 'object'
+              ? verification.finalAudit
+              : {};
+            return {
+              researchApproach: boundedText(verification.researchApproach, 3000),
+              consensusStatus: ['established', 'mixed', 'uncertain'].includes(verification.consensusStatus)
+                ? verification.consensusStatus
+                : 'uncertain',
+              disagreements: boundedList(verification.disagreements, 12, 1000),
+              uncertainty: boundedList(verification.uncertainty, 12, 1000),
+              adversarialReview: {
+                issuesFound: boundedList(adversarialReview.issuesFound, 12, 1000),
+                correctionsMade: boundedList(adversarialReview.correctionsMade, 12, 1000),
+                unresolvedIssues: boundedList(adversarialReview.unresolvedIssues, 12, 1000)
+              },
+              finalAudit: {
+                accuracyPassed: finalAudit.accuracyPassed === true,
+                sourceTraceabilityPassed: finalAudit.sourceTraceabilityPassed === true,
+                completenessPassed: finalAudit.completenessPassed === true,
+                learnerFitPassed: finalAudit.learnerFitPassed === true,
+                noFabricationPassed: finalAudit.noFabricationPassed === true
+              }
+            };
+          }
+
           export function normalizePlan(raw, user) {
             const proposals = Array.isArray(raw.proposals) ? raw.proposals.slice(0, 5) : [];
+            if (raw && typeof raw === 'object') raw.verification = normalizePlanVerification(raw.verification);
             return {
               primarySubject: boundedText(raw.primarySubject || user.rankedTopics?.[0] || user.interests?.[0] || 'General knowledge', 300),
               secondarySubjects: boundedList(raw.secondarySubjects, 3, 300),
@@ -69,6 +109,7 @@ jobs:
 
           export function normalizeLesson(raw, proposal, sources, user) {
             const content = raw.content || {};
+            if (raw && typeof raw === 'object') raw.verification = normalizeLessonVerification(raw.verification);
             const aiSourceAnnotations = new Map((Array.isArray(raw.sources) ? raw.sources : []).slice(0, 50).map((source) => [boundedText(source.id, 120), source]));
             const lessonSources = sources.slice(0, 20).map((source, index) => {
               const sourceId = boundedText(source.id || `src_${index + 1}`, 120);
@@ -150,7 +191,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/services/learning.js
-          git rm .github/result-bounds-trigger
+          git rm .github/verification-bounds-trigger
           git diff --cached --check
-          git commit -m 'fix: bound normalized plan and lesson model output [result-bounds-fix]'
-          git push origin HEAD:fix/model-output-bounds
+          git commit -m 'fix: bound learning model output and verification metadata [verification-bounds-fix]'
+          git push origin HEAD:fix/verification-bounds
