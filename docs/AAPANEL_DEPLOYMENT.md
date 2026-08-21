@@ -8,7 +8,7 @@ This is the authoritative deployment and rollback procedure for Knowledge Pilot 
 - Live application path: `/www/wwwroot/knowledgepilot`.
 - Bind the Node application to `127.0.0.1:3100`; expose it only through the existing HTTPS reverse proxy.
 - Preserve only runtime-owned material: `.env`, `data/`, and server-owned `.well-known/` when present.
-- Do **not** preserve `automation/`, application source, `node_modules/`, or other release files. They belong to the release being deployed.
+- Do **not** preserve `automation/`, application source, `node_modules/`, `.git/`, or other release files. They belong to the release being deployed or to the deployment checkout outside the web root.
 - Run exactly one Knowledge Pilot application instance. Reuse the process manager that already owns the live process; do not introduce PM2, systemd, or another manager during a code cutover.
 - The server deployment credential must be repository-specific and read-only. A write-capable GitHub CLI/token credential is not part of the steady-state deployment design.
 - Never print `.env`, deployment keys, bearer tokens, or other secrets into logs or terminal output.
@@ -92,7 +92,7 @@ Do not continue if any install, configuration check, test, or audit fails.
 
 ## 4. Create a rollback code snapshot
 
-The rollback snapshot intentionally excludes live secrets and mutable application data:
+The rollback snapshot intentionally excludes live secrets, mutable application data, server-owned ACME material, and any repository metadata that should not live in the web root:
 
 ```bash
 rm -rf "$ROLLBACK"
@@ -101,6 +101,7 @@ rsync -a \
   --exclude='.env' \
   --exclude='data/' \
   --exclude='.well-known/' \
+  --exclude='.git/' \
   "$LIVE/" "$ROLLBACK/"
 ```
 
@@ -110,7 +111,7 @@ Confirm that `$ROLLBACK/src/index.js` exists before proceeding.
 
 1. Stop **only** the confirmed Knowledge Pilot process using the exact manager identified in step 1.
 2. Confirm port `3100` is no longer owned by the old Knowledge Pilot PID.
-3. Replace release-owned files while preserving runtime-owned data/configuration:
+3. Replace release-owned files while preserving runtime-owned data/configuration and server-owned ACME material:
 
 ```bash
 rsync -a --delete \
@@ -120,10 +121,13 @@ rsync -a --delete \
   "$STAGE/" "$LIVE/"
 ```
 
-4. Restore ownership to the actual runtime account and keep `.env` private. Example only when `www:www` is the confirmed runtime identity:
+Because the stage comes from `git archive`, old live `.git/` metadata is removed by this cutover rather than carried into production.
+
+4. Restore ownership to the actual runtime account without recursively touching `.well-known`. Example only when `www:www` is the confirmed runtime identity:
 
 ```bash
-chown -R www:www "$LIVE"
+chown www:www "$LIVE"
+find "$LIVE" -mindepth 1 -maxdepth 1 ! -name '.well-known' -exec chown -R www:www -- {} +
 chmod 600 "$LIVE/.env"
 find "$LIVE/data" -type d -exec chmod 750 {} \;
 find "$LIVE/data" -type f -exec chmod 640 {} \;
@@ -161,7 +165,7 @@ curl -fsS https://YOUR_DOMAIN/health
 curl -fsS https://YOUR_DOMAIN/gpt-action/openapi.json
 ```
 
-Confirm the reported application version matches `<RELEASE_TAG>` and that the process serving port `3100` has the expected live working directory.
+Confirm the reported application version matches the version encoded by `<RELEASE_TAG>` and that the process serving port `3100` has the expected live working directory.
 
 Then perform the functional smoke set:
 
@@ -176,7 +180,7 @@ Do not call the release deployed until the smoke set passes.
 
 ## 8. Rollback
 
-Rollback uses the same process owner and keeps the current `.env` and `data/` intact:
+Rollback uses the same process owner and keeps the current `.env`, `data/`, and server-owned `.well-known/` intact:
 
 1. Stop only the confirmed Knowledge Pilot process.
 2. Restore the previous release-owned files:
@@ -189,9 +193,10 @@ rsync -a --delete \
   "$ROLLBACK/" "$LIVE/"
 ```
 
-3. Restart through the same process manager.
-4. Re-run local and external health checks.
-5. If Workspace Agent unit templates changed between releases, rerun that restored release's `deploy/configure-server.mjs`, `systemctl daemon-reload`, `nginx -t`, and restart its MCP service.
+3. Restore ownership to release-owned paths using the confirmed runtime account, again excluding `.well-known` from recursive ownership changes.
+4. Restart through the same process manager.
+5. Re-run local and external health checks.
+6. If Workspace Agent unit templates changed between releases, rerun that restored release's `deploy/configure-server.mjs`, `systemctl daemon-reload`, `nginx -t`, and restart its MCP service.
 
 If rollback cannot be verified, keep the service stopped rather than starting an unverified combination of code and runtime state.
 
