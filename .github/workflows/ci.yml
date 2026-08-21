@@ -69,7 +69,16 @@ jobs:
           cache: npm
       - name: Apply bounded frontend repair
         if: steps.gate.outputs.apply == 'true'
-        run: python3 .github/frontend-runtime-repair.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('.github/frontend-runtime-repair.py').read_text()
+          old = 'updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)'
+          new = 'updated, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=re.S)'
+          if source.count(old) != 1:
+              raise SystemExit('transformer regex replacement anchor is not unique')
+          exec(compile(source.replace(old, new, 1), '.github/frontend-runtime-repair.py', 'exec'))
+          PY
       - name: Verify exact source scope
         if: steps.gate.outputs.apply == 'true'
         run: |
