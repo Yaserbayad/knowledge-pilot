@@ -1,3 +1,4 @@
+import net from 'node:net';
 import path from 'node:path';
 import process from 'node:process';
 import { APP_VERSION } from './version.js';
@@ -30,8 +31,9 @@ function productionSecret(name, value, minLength) {
 }
 
 function isLoopbackHostname(hostname) {
-  const host = String(hostname || '').toLowerCase();
-  return host === 'localhost' || host === '::1' || host === '[::1]' || host.startsWith('127.');
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '::1') return true;
+  return net.isIP(host) === 4 && host.split('.')[0] === '127';
 }
 
 function serviceUrl(name, value, { required = true, requireHttpsInProduction = false, allowLoopbackHttp = false } = {}) {
