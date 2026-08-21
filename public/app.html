@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3efe6">
+  <title>Knowledge Pilot</title>
+  <script>try{const t=localStorage.getItem('knowledge-pilot-theme');document.documentElement.dataset.theme=t||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch{}</script>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script defer src="/assets/theme.js"></script>
+</head>
+<body class="learner-shell">
+<a class="skip-link" href="#main-content">Skip to content</a>
+<header class="topbar">
+  <div class="container topbar-inner">
+    <div class="brand" aria-label="Knowledge Pilot">Knowledge <span>Pilot</span></div>
+    <div class="topbar-actions">
+      <div id="user-name" class="user-name" dir="auto"></div>
+      <button type="button" class="theme-toggle" data-theme-toggle>
+        <span data-theme-icon aria-hidden="true">☾</span>
+        <span data-theme-label>Dark</span>
+      </button>
+    </div>
+  </div>
+</header>
+<main id="main-content" class="container main-content" tabindex="-1">
+  <div id="loading" class="loading" role="status">Loading your learning profile…</div>
+  <div id="error" class="notice error hidden" role="alert"></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <div id="onboarding" class="hidden"></div>
+  <div id="workspace" class="hidden">
+    <nav class="nav-tabs" aria-label="Learning workspace">
+      <button data-tab="today" class="active"><span class="nav-icon" aria-hidden="true">●</span><span>Today</span></button>
+      <button data-tab="plan"><span class="nav-icon" aria-hidden="true">▦</span><span>Weekly plan</span></button>
+      <button data-tab="books"><span class="nav-icon" aria-hidden="true">▥</span><span>Books</span></button>
+      <button data-tab="library"><span class="nav-icon" aria-hidden="true">▤</span><span>Library</span></button>
+      <button data-tab="progress"><span class="nav-icon" aria-hidden="true">↗</span><span>Progress</span></button>
+      <button data-tab="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>Settings</span></button>
+    </nav>
+    <section id="tab-today" class="section active" aria-live="polite"></section>
+    <section id="tab-plan" class="section"></section>
+    <section id="tab-books" class="section"></section>
+    <section id="tab-library" class="section"></section>
+    <section id="tab-progress" class="section"></section>
+    <section id="tab-settings" class="section"></section>
+  </div>
+</main>
+<div id="dialog" class="dialog hidden" role="dialog" aria-modal="true"></div>
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>

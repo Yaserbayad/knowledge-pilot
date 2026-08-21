@@ -1,0 +1,34 @@
+[Unit]
+Description=Knowledge Pilot Workspace Agent MCP bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www
+Group=www
+WorkingDirectory=/www/wwwroot/knowledgepilot/automation/workspace-agent
+EnvironmentFile=/etc/knowledgepilot/workspace-agent.env
+ExecStart=/www/server/nodejs/v24.18.0/bin/node src/mcp-server.mjs
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

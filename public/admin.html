@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3efe6">
+  <title>Knowledge Pilot Admin</title>
+  <script>try{const t=localStorage.getItem('knowledge-pilot-theme');document.documentElement.dataset.theme=t||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch{}</script>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script defer src="/assets/theme.js"></script>
+</head>
+<body class="admin-shell">
+<header class="topbar"><div class="container topbar-inner"><div class="brand">Knowledge <span>Pilot</span> Admin</div><div class="topbar-actions"><a href="/">Public page</a><button type="button" class="theme-toggle" data-theme-toggle><span data-theme-icon aria-hidden="true">☾</span><span data-theme-label>Dark</span></button></div></div></header>
+<main class="container main-content">
+  <div id="error" class="notice error hidden"></div>
+  <section id="login" class="hero compact-hero">
+    <div class="card"><div class="kicker">Administrator</div><h2>Sign in</h2><form id="login-form"><label>Admin token<input type="password" name="token" required autocomplete="current-password"></label><button class="form-submit">Sign in</button></form></div>
+  </section>
+  <section id="admin-workspace" class="hidden">
+    <nav class="nav-tabs">
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="users">Users</button>
+      <button data-tab="plans">Plans</button>
+      <button data-tab="lessons">Lessons</button>
+      <button data-tab="books">Books</button>
+      <button data-tab="channels">Channels</button>
+      <button data-tab="operations">Operations</button>
+    </nav>
+    <section id="tab-overview" class="section active"></section>
+    <section id="tab-users" class="section"></section>
+    <section id="tab-plans" class="section"></section>
+    <section id="tab-lessons" class="section"></section>
+    <section id="tab-books" class="section"></section>
+    <section id="tab-channels" class="section"></section>
+    <section id="tab-operations" class="section"></section>
+  </section>
+</main>
+<div id="dialog" class="dialog hidden"></div>
+<script type="module" src="/assets/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+[Unit]
+Description=Trigger the Knowledge Pilot Workspace Agent when verified work is pending
+After=network-online.target knowledgepilot-mcp.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=www
+Group=www
+WorkingDirectory=/www/wwwroot/knowledgepilot/automation/workspace-agent
+EnvironmentFile=/etc/knowledgepilot/workspace-agent.env
+ExecStart=/www/server/nodejs/v24.18.0/bin/node src/trigger-worker.mjs
+StateDirectory=knowledgepilot-workspace-agent
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/www/wwwroot/knowledgepilot/data
+ReadWritePaths=/var/lib/knowledgepilot-workspace-agent
+UMask=0077

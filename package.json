@@ -1,0 +1,25 @@
+{
+  "name": "knowledge-pilot",
+  "version": "1.4.1",
+  "description": "Self-hosted adaptive personal knowledge and book learning system",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "NODE_ENV=development node --watch src/index.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check src/index.js && node --test tests/*.test.js",
+    "create-admin-token": "node scripts/create-admin-token.js",
+    "backup": "node scripts/backup.js",
+    "generate-secrets": "node scripts/generate-secrets.js",
+    "verify-config": "node scripts/verify-config.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc13",
+    "adm-zip": "0.6.0",
+    "pdf-parse": "2.4.5"
+  }
+}

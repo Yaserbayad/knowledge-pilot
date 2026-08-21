@@ -1,0 +1,19 @@
+{
+  "name": "knowledgepilot-workspace-agent-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/mcp-server.mjs",
+    "trigger": "node src/trigger-worker.mjs",
+    "check": "node --check src/mcp-server.mjs && node --check src/trigger-worker.mjs && node --check deploy/configure-server.mjs && node --test tests/*.test.mjs",
+    "verify-config": "node src/verify-config.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.4.3"
+  }
+}

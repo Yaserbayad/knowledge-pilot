@@ -1,0 +1,13 @@
+[Unit]
+Description=Check Knowledge Pilot for autonomous Workspace Agent work
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+RandomizedDelaySec=15s
+AccuracySec=15s
+Persistent=true
+Unit=knowledgepilot-agent-trigger.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+node_modules/
+.env
+*.log
+.DS_Store
+data/state.json
+data/state.json.tmp
+data/backups/*.json
+data/whatsapp-auth/*
+data/cards/*.svg
+
+data/book-files/*
+!data/book-files/.gitkeep
