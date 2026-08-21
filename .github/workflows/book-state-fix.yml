@@ -1,5 +1,6 @@
 name: Apply verified book-state fix
 
+# Temporary, self-removing verification workflow for the isolated fix branch.
 on:
   push:
     branches: [fix/book-state-atomicity]
