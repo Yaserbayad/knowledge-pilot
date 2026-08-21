@@ -88,9 +88,14 @@ configure_paths() {
 
 require_commands() {
   local command
-  for command in bash flock git tar rsync stat ss runuser node npm curl awk sed grep readlink find chown chmod df du seq sort cut basename head install mktemp; do
+  for command in bash flock git tar rsync stat ss runuser node npm curl awk sed grep readlink find chown chmod df du seq sort cut basename head install mktemp dirname tr id sleep kill; do
     command -v "$command" >/dev/null 2>&1 || { printf 'Missing required command: %s\n' "$command" >&2; return 1; }
   done
+  if [[ -d "${LIVE:-}/automation/workspace-agent" ]]; then
+    for command in systemctl nginx; do
+      command -v "$command" >/dev/null 2>&1 || { printf 'Missing required command: %s\n' "$command" >&2; return 1; }
+    done
+  fi
 }
 
 listener_snapshot() {
@@ -182,7 +187,7 @@ verify_start_script_runtime_writes() {
     target="${target%\"}"; target="${target#\"}"
     target="${target%\'}"; target="${target#\'}"
     [[ "$target" == /* ]] || continue
-    # aaPanel's generated start script commonly writes its PID file itself. The
+    # aaPanel's generated script commonly writes its PID file itself. The
     # runtime user does not need permission for that final bookkeeping write:
     # the deployer rewrites the PID file as root only after the listener,
     # cwd, argv and runtime identity have been independently verified.
@@ -270,12 +275,20 @@ resolve_release() {
   RELEASE_VERSION="${RELEASE_TAG#v}"
 }
 
+workspace_agent_topology_matches() {
+  [[ "${1:-}" == "${2:-}" ]]
+}
+
 verify_stage_identity() {
   [[ -f "$STAGE/VERSION" && -f "$STAGE/package.json" && -f "$STAGE/src/index.js" ]] || return 1
   [[ "$(tr -d '[:space:]' < "$STAGE/VERSION")" == "$RELEASE_VERSION" ]] || return 1
   local package_version
   package_version="$(node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.version||""))' "$STAGE/package.json")" || return 1
   [[ "$package_version" == "$RELEASE_VERSION" ]] || return 1
+  local live_workspace=0 stage_workspace=0
+  [[ -d "$LIVE/automation/workspace-agent" ]] && live_workspace=1
+  [[ -d "$STAGE/automation/workspace-agent" ]] && stage_workspace=1
+  workspace_agent_topology_matches "$live_workspace" "$stage_workspace" || return 1
   grep -Fq "ENGINE_COMPATIBILITY=\"$ENGINE_COMPATIBILITY\"" "$STAGE/scripts/deploy-release.sh" || return 1
 }
 
@@ -332,8 +345,11 @@ capture_workspace_timer_state() {
 pause_workspace_timer_if_active() {
   (( TEST_MODE == 1 )) && return 0
   if [[ "$TIMER_WAS_ACTIVE" == "active" ]]; then
-    systemctl stop "$WORKSPACE_TIMER" || return 1
+    # Mark restoration responsibility before invoking stop: systemctl may
+    # complete the side effect even if its client command later reports an error.
     AUTOMATION_PAUSED=1
+    systemctl stop "$WORKSPACE_TIMER" || return 1
+    if systemctl is-active --quiet "$WORKSPACE_TIMER"; then return 1; fi
   fi
 }
 
@@ -341,6 +357,7 @@ restore_workspace_timer_state() {
   (( TEST_MODE == 1 )) && { AUTOMATION_PAUSED=0; return 0; }
   if (( AUTOMATION_PAUSED == 1 )); then
     systemctl start "$WORKSPACE_TIMER" || return 1
+    systemctl is-active --quiet "$WORKSPACE_TIMER" || return 1
     AUTOMATION_PAUSED=0
   fi
   local now_enabled
@@ -479,9 +496,7 @@ verify_running_release() {
   local expected="$1" pid
   pid="$(get_listener_pid)" || { printf 'RUNTIME_CHECK=LISTENER_FAIL\n' >&2; return 1; }
   verify_process_identity "$pid" || { printf 'RUNTIME_CHECK=PROCESS_IDENTITY_FAIL\n' >&2; return 1; }
-  local actual_version
-  actual_version="$(tr -d '[:space:]' < "$LIVE/VERSION")"
-  [[ "$actual_version" == "$expected" ]] || { printf 'RUNTIME_CHECK=VERSION_FAIL actual=%s expected=%s\n' "$actual_version" "$expected" >&2; return 1; }
+  local actual_version; actual_version="$(tr -d '[:space:]' < "$LIVE/VERSION")"; [[ "$actual_version" == "$expected" ]] || { printf 'RUNTIME_CHECK=VERSION_FAIL actual=%s expected=%s\n' "$actual_version" "$expected" >&2; return 1; }
   local_health_smoke "$expected" || { printf 'RUNTIME_CHECK=LOCAL_HEALTH_FAIL\n' >&2; return 1; }
   CURRENT_PID="$pid"
 }
@@ -605,8 +620,11 @@ main() {
 
   phase LIVE_STOP
   verify_current_runtime || fail "runtime changed before stop"
-  graceful_stop_application "$CURRENT_PID" || fail "graceful live stop failed"
+  # Sending TERM is already a material production availability mutation. From
+  # this point onward every failure is rollback-eligible, even if port clear
+  # confirmation itself times out.
   CUTOVER_STARTED=1
+  graceful_stop_application "$CURRENT_PID" || fail "graceful live stop failed"
 
   phase CUTOVER_FILES
   cutover_files || fail "release cutover failed"
