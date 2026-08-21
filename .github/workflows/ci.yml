@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, audit/comprehensive-hardening]
+
+permissions:
+  contents: read
+
+jobs:
+  application:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Application checks and tests
+        run: npm run check
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
+  workspace-agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: automation/workspace-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: automation/workspace-agent/package-lock.json
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Workspace Agent checks and tests
+        run: npm run check
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=high
