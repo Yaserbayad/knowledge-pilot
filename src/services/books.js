@@ -76,7 +76,7 @@ function queueBookAnalysisTask(state, { businessActions, userId, bookId }) {
   if (!businessActions) throw new Error('ChatGPT Business Actions service is unavailable');
   const dedupeKey = `book_analysis:${bookId}:active`;
   const existing = Object.values(state.businessTasks || {}).find((task) => task.dedupeKey === dedupeKey && ['pending', 'claimed'].includes(task.status));
-  if (existing) return { queued: true, existing: true, task: existing };
+  if (existing) return { queued: true, existing: true, task: existing, ...existing };
   const task = {
     id: uid('btask'), type: 'book_analysis', userId, payload: { bookId }, dedupeKey, priority: 95,
     status: 'pending', claimedAt: null, completedAt: null, attempts: 0, resultRef: null, error: null,
@@ -97,7 +97,7 @@ function queueBookAnalysisTask(state, { businessActions, userId, bookId }) {
       metadata: { taskId: task.id, taskType: task.type }
     });
   }
-  return { queued: true, existing: false, task };
+  return { queued: true, existing: false, task, ...task };
 }
 
 function scheduleRemainingBookWork(state, { userId, book, plan, restartExisting = false, startAt = Date.now() }) {
@@ -340,7 +340,7 @@ export class BookLearningService {
       if (!target || target.userId !== userId || !state.users?.[userId]) throw new Error('Book no longer exists');
       const currentTask = target.analysisTaskId ? state.businessTasks?.[target.analysisTaskId] : null;
       const existing = currentTask && ['pending', 'claimed'].includes(currentTask.status) ? currentTask : null;
-      if (existing && !force) return { queued: true, existing: true, task: existing };
+      if (existing && !force) return { queued: true, existing: true, task: existing, ...existing };
 
       cancelBookJobs(state, bookId, { includeDelivery: true });
       for (const task of Object.values(state.businessTasks || {})) {
