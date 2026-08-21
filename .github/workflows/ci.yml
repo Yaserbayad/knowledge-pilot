@@ -45,13 +45,14 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   frontend-runtime-repair:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/audit/comprehensive-hardening' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'audit/comprehensive-hardening' }}
     permissions:
       contents: write
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: audit/comprehensive-hardening
           fetch-depth: 0
       - id: gate
         name: Check one-time repair marker
