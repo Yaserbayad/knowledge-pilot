@@ -41,18 +41,28 @@ function cleanPassage(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
 }
 
+function boundedText(value, max) {
+  return String(value ?? '').trim().slice(0, max);
+}
+
+function boundedList(value, maxItems, itemMax) {
+  return Array.isArray(value)
+    ? value.slice(0, maxItems).map((item) => boundedText(item, itemMax)).filter(Boolean)
+    : [];
+}
+
 export function normalizePlan(raw, user) {
   const proposals = Array.isArray(raw.proposals) ? raw.proposals.slice(0, 5) : [];
   return {
-    primarySubject: String(raw.primarySubject || user.rankedTopics?.[0] || user.interests?.[0] || 'General knowledge'),
-    secondarySubjects: Array.isArray(raw.secondarySubjects) ? raw.secondarySubjects.slice(0, 3).map(String) : [],
-    rationale: String(raw.rationale || ''),
+    primarySubject: boundedText(raw.primarySubject || user.rankedTopics?.[0] || user.interests?.[0] || 'General knowledge', 300),
+    secondarySubjects: boundedList(raw.secondarySubjects, 3, 300),
+    rationale: boundedText(raw.rationale, 3000),
     proposals: proposals.map((p, index) => ({
       id: uid('proposal'),
-      title: String(p.title || `Lesson ${index + 1}`),
-      question: String(p.question || p.title || `Lesson ${index + 1}`),
-      topic: String(p.topic || raw.primarySubject || 'General knowledge'),
-      reason: String(p.reason || ''),
+      title: boundedText(p.title || `Lesson ${index + 1}`, 300),
+      question: boundedText(p.question || p.title || `Lesson ${index + 1}`, 1200),
+      topic: boundedText(p.topic || raw.primarySubject || 'General knowledge', 300),
+      reason: boundedText(p.reason, 1200),
       estimatedMinutes: clamp(Number(p.estimatedMinutes) || 8, 4, 15),
       order: index + 1
     }))
@@ -61,53 +71,54 @@ export function normalizePlan(raw, user) {
 
 export function normalizeLesson(raw, proposal, sources, user) {
   const content = raw.content || {};
-  const aiSourceAnnotations = new Map((Array.isArray(raw.sources) ? raw.sources : []).map((source) => [String(source.id || ''), source]));
-  const lessonSources = sources.map((source, index) => {
-    const annotation = aiSourceAnnotations.get(String(source.id || '')) || {};
+  const aiSourceAnnotations = new Map((Array.isArray(raw.sources) ? raw.sources : []).slice(0, 50).map((source) => [boundedText(source.id, 120), source]));
+  const lessonSources = sources.slice(0, 20).map((source, index) => {
+    const sourceId = boundedText(source.id || `src_${index + 1}`, 120);
+    const annotation = aiSourceAnnotations.get(sourceId) || {};
     return {
-      id: source.id || `src_${index + 1}`,
-      title: String(source.title || source.url || `Source ${index + 1}`),
-      url: String(source.url || ''),
-      domain: source.domain || (() => { try { return new URL(source.url).hostname; } catch { return ''; } })(),
+      id: sourceId,
+      title: boundedText(source.title || source.url || `Source ${index + 1}`, 500),
+      url: boundedText(source.url, 2000),
+      domain: boundedText(source.domain || (() => { try { return new URL(source.url).hostname; } catch { return ''; } })(), 253),
       accessedAt: source.accessedAt || nowIso(),
       fetchStatus: source.fetchStatus || 'ok',
-      excerpt: source.excerpt ? String(source.excerpt).slice(0, 2000) : '',
-      claimsSupported: Array.isArray(annotation.claimsSupported) ? annotation.claimsSupported.map(String) : []
+      excerpt: boundedText(source.excerpt, 2000),
+      claimsSupported: boundedList(annotation.claimsSupported, 20, 300)
     };
   });
   return {
-    title: String(raw.title || proposal.title),
-    question: String(raw.question || proposal.question),
-    topic: String(raw.topic || proposal.topic),
-    language: String(raw.language || user.language || 'en'),
+    title: boundedText(raw.title || proposal.title, 300),
+    question: boundedText(raw.question || proposal.question, 1200),
+    topic: boundedText(raw.topic || proposal.topic, 300),
+    language: boundedText(raw.language || user.language || 'en', 20),
     estimatedMinutes: clamp(Number(raw.estimatedMinutes) || proposal.estimatedMinutes || 8, 4, 15),
     difficulty: ['easy', 'moderate', 'demanding'].includes(raw.difficulty) ? raw.difficulty : 'moderate',
     content: {
-      hook: String(content.hook || ''),
-      coreExplanation: String(content.coreExplanation || ''),
-      context: String(content.context || ''),
-      examples: Array.isArray(content.examples) ? content.examples.slice(0, 4).map(String) : [],
-      perspectives: Array.isArray(content.perspectives) ? content.perspectives.slice(0, 4).map(String) : [],
-      misconceptions: Array.isArray(content.misconceptions) ? content.misconceptions.slice(0, 4).map(String) : [],
-      practicalMeaning: String(content.practicalMeaning || ''),
-      knowledgeConnection: String(content.knowledgeConnection || ''),
-      keyIdeas: Array.isArray(content.keyIdeas) ? content.keyIdeas.slice(0, 3).map(String) : [],
-      practicalTakeaway: String(content.practicalTakeaway || ''),
-      reflectionPrompt: String(content.reflectionPrompt || ''),
-      nextTeaser: String(content.nextTeaser || '')
+      hook: boundedText(content.hook, 2000),
+      coreExplanation: boundedText(content.coreExplanation, 12000),
+      context: boundedText(content.context, 8000),
+      examples: boundedList(content.examples, 4, 3000),
+      perspectives: boundedList(content.perspectives, 4, 3000),
+      misconceptions: boundedList(content.misconceptions, 4, 3000),
+      practicalMeaning: boundedText(content.practicalMeaning, 5000),
+      knowledgeConnection: boundedText(content.knowledgeConnection, 3000),
+      keyIdeas: boundedList(content.keyIdeas, 3, 1000),
+      practicalTakeaway: boundedText(content.practicalTakeaway, 3000),
+      reflectionPrompt: boundedText(content.reflectionPrompt, 1500),
+      nextTeaser: boundedText(content.nextTeaser, 1500)
     },
     quiz: Array.isArray(raw.quiz) ? raw.quiz.slice(0, 5).map((q) => ({
       id: uid('question'),
       type: ['recall', 'explanation', 'application', 'multiple_choice'].includes(q.type) ? q.type : 'recall',
-      question: String(q.question || ''),
-      expected: String(q.expected || ''),
-      options: Array.isArray(q.options) ? q.options.map(String) : undefined
+      question: boundedText(q.question, 1500),
+      expected: boundedText(q.expected, 3000),
+      options: Array.isArray(q.options) ? boundedList(q.options, 8, 500) : undefined
     })) : [],
     sources: lessonSources,
     claims: Array.isArray(raw.claims) ? raw.claims.slice(0, 20).map((claim) => ({
-      text: String(claim.text || ''),
-      sourceIds: Array.isArray(claim.sourceIds) ? claim.sourceIds.map(String) : []
-    })) : []
+      text: boundedText(claim.text, 2000),
+      sourceIds: boundedList(claim.sourceIds, 10, 120)
+    })).filter((claim) => claim.text) : []
   };
 }
 
