@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -9,6 +10,36 @@ const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon'
 };
+
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "img-src 'self' data: https:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "frame-ancestors 'none'",
+  "frame-src 'none'",
+  "form-action 'self'",
+  "manifest-src 'self'",
+  "worker-src 'self'"
+].join('; ');
+
+function applySecurityHeaders(res, config) {
+  res.setHeader('content-security-policy', CSP);
+  res.setHeader('referrer-policy', 'no-referrer');
+  res.setHeader('x-frame-options', 'DENY');
+  res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+  if (config.nodeEnv === 'production') res.setHeader('strict-transport-security', 'max-age=31536000');
+}
+
+function requestIdFor(req) {
+  const supplied = String(req.headers['x-request-id'] || '');
+  if (/^[A-Za-z0-9._:-]{1,128}$/.test(supplied)) return supplied;
+  return randomUUID();
+}
 
 function send(res, status, body, headers = {}) {
   const payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
@@ -43,32 +74,63 @@ function statusForError(error) {
   return 500;
 }
 
-function requireSameOrigin(req, config) {
-  const origin = String(req.headers.origin || '');
-  if (!origin) return;
-  if (origin !== new URL(config.appBaseUrl).origin) throw httpError('Cross-origin account deletion is forbidden', 403, 'CROSS_ORIGIN_DELETE');
+function isMutation(method) {
+  return !['GET', 'HEAD', 'OPTIONS'].includes(String(method || '').toUpperCase());
 }
 
-async function bodyBuffer(req, maxBytes = 30 * 1024 * 1024) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > maxBytes) throw httpError('Request body too large', 413, 'PAYLOAD_TOO_LARGE');
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
+function requireSameOrigin(req, config) {
+  const fetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+  if (fetchSite === 'cross-site') throw httpError('Cross-site browser request is forbidden', 403, 'CROSS_SITE_REQUEST');
+  const origin = String(req.headers.origin || '');
+  if (!origin) return;
+  if (origin !== new URL(config.appBaseUrl).origin) throw httpError('Cross-origin browser request is forbidden', 403, 'CROSS_ORIGIN_REQUEST');
+}
+
+function bodyBuffer(req, maxBytes = 30 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > maxBytes) tooLarge = true;
+
+    const cleanup = () => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('aborted', onAborted);
+      req.off('error', onError);
+    };
+    const onData = (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) tooLarge = true;
+      if (!tooLarge) chunks.push(chunk);
+    };
+    const onEnd = () => {
+      cleanup();
+      if (tooLarge) return reject(httpError('Request body too large', 413, 'PAYLOAD_TOO_LARGE'));
+      resolve(Buffer.concat(chunks));
+    };
+    const onAborted = () => {
+      cleanup();
+      reject(httpError('Request body aborted', 400, 'REQUEST_ABORTED'));
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('aborted', onAborted);
+    req.on('error', onError);
+  });
 }
 
 async function bodyJson(req) {
-  let body = '';
-  for await (const chunk of req) {
-    body += chunk;
-    if (body.length > 2_000_000) throw httpError('Request body too large', 413, 'PAYLOAD_TOO_LARGE');
-  }
-  if (!body) return {};
+  const raw = await bodyBuffer(req, 2_000_000);
+  if (!raw.length) return {};
   try {
-    return JSON.parse(body);
+    return JSON.parse(raw.toString('utf8'));
   } catch (error) {
     error.statusCode = 400;
     error.code = 'INVALID_JSON';
@@ -81,7 +143,11 @@ function routeMatch(pathname, pattern) {
   const regex = new RegExp(`^${pattern.replace(/:([A-Za-z0-9_]+)/g, (_, name) => { names.push(name); return '([^/]+)'; })}$`);
   const match = pathname.match(regex);
   if (!match) return null;
-  return Object.fromEntries(names.map((name, index) => [name, decodeURIComponent(match[index + 1])]));
+  try {
+    return Object.fromEntries(names.map((name, index) => [name, decodeURIComponent(match[index + 1])]));
+  } catch {
+    throw httpError('Invalid route encoding', 400, 'INVALID_ROUTE_ENCODING');
+  }
 }
 
 function adminSession(config) {
@@ -125,12 +191,17 @@ export function createServer({ config, store, learning, books = null, bookFiles 
 
   const server = http.createServer(async (req, res) => {
     const started = Date.now();
+    const requestId = requestIdFor(req);
+    let requestPath = '/';
+    applySecurityHeaders(res, config);
+    res.setHeader('x-request-id', requestId);
     try {
       const url = new URL(req.url, config.appBaseUrl);
       const pathname = url.pathname;
-      if (pathname === '/health') return json(res, 200, { ok: true, time: nowIso(), whatsapp: whatsapp.status, telegram: telegram.enabled, scheduler: { enabled: config.scheduler.enabled, running: scheduler.running, lastTickAt: scheduler.lastTickAt, lastError: scheduler.lastError }, businessActions: Boolean(businessActions?.enabled) });
+      requestPath = pathname;
+      if (pathname === '/health') return json(res, 200, { ok: true, version: config.version });
       if (pathname === '/gpt-action/openapi.json' && req.method === 'GET') return json(res, 200, gptOpenApi(config.appBaseUrl));
-      if (pathname === '/privacy' && req.method === 'GET') return send(res, 200, `<!doctype html><html><head><meta charset="utf-8"><title>Knowledge Pilot Privacy</title></head><body style="max-width:760px;margin:40px auto;font:16px/1.6 system-ui"><h1>Knowledge Pilot Privacy</h1><p>This private self-hosted service stores learner profiles, lessons, progress, feedback, and message metadata on the operator's server. Data sent through the ChatGPT Action is processed within the connected ChatGPT Business workspace and returned to this server. The service does not sell data or use it for advertising.</p><p>Learners can permanently delete their account and live data from Settings. Administrators can perform the same deletion from the Learners panel. Protected disaster-recovery backups may retain historical data until normal backup rotation removes them.</p></body></html>`, { 'content-type': 'text/html; charset=utf-8' });
+      if (pathname === '/privacy' && req.method === 'GET') return send(res, 200, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Knowledge Pilot Privacy</title><link rel="stylesheet" href="/assets/styles.css"></head><body><main><h1>Knowledge Pilot Privacy</h1><p>This private self-hosted service stores learner profiles, lessons, progress, feedback, and message metadata on the operator's server. Data sent through the ChatGPT Action is processed within the connected ChatGPT Business workspace and returned to this server. The service does not sell data or use it for advertising.</p><p>Learners can permanently delete their account and live data from Settings. Administrators can perform the same deletion from the Learners panel. Protected disaster-recovery backups may retain historical data until normal backup rotation removes them.</p></main></body></html>`, { 'content-type': 'text/html; charset=utf-8' });
       if (pathname === '/' && req.method === 'GET') return serveFile(res, path.join(publicDir, 'index.html'));
       if (pathname === '/app' && req.method === 'GET') return serveFile(res, path.join(publicDir, 'app.html'));
       if (pathname === '/admin' && req.method === 'GET') return serveFile(res, path.join(publicDir, 'admin.html'));
@@ -161,7 +232,10 @@ export function createServer({ config, store, learning, books = null, bookFiles 
         if (!adminTokenMatches(config.adminToken, body.token)) return json(res, 403, { error: 'Invalid admin token' });
         return jsonWithCookie(res, 200, { ok: true }, cookie('kp_admin', adminSession(config), { secure: config.nodeEnv === 'production', maxAge: 60 * 60 * 12 }));
       }
-      if (pathname === '/api/admin/logout' && req.method === 'POST') return jsonWithCookie(res, 200, { ok: true }, cookie('kp_admin', '', { secure: config.nodeEnv === 'production', maxAge: 0 }));
+      if (pathname === '/api/admin/logout' && req.method === 'POST') {
+        requireSameOrigin(req, config);
+        return jsonWithCookie(res, 200, { ok: true }, cookie('kp_admin', '', { secure: config.nodeEnv === 'production', maxAge: 0 }));
+      }
 
       if (pathname === '/api/telegram/webhook' && req.method === 'POST') {
         if (!telegram.enabled) return json(res, 404, { error: 'Telegram disabled' });
@@ -196,6 +270,7 @@ export function createServer({ config, store, learning, books = null, bookFiles 
 
       if (pathname.startsWith('/api/admin/')) {
         if (!isAdmin(req)) return json(res, 401, { error: 'Admin authentication required' });
+        if (isMutation(req.method)) requireSameOrigin(req, config);
         if (pathname === '/api/admin/status' && req.method === 'GET') return json(res, 200, {
           ok: true, version: config.version, whatsapp: whatsapp.status, telegram: telegram.enabled,
           scheduler: { enabled: config.scheduler.enabled, running: scheduler.running, lastTickAt: scheduler.lastTickAt, lastError: scheduler.lastError },
@@ -237,7 +312,6 @@ export function createServer({ config, store, learning, books = null, bookFiles 
         params = routeMatch(pathname, '/api/admin/users/:userId');
         if (params && req.method === 'DELETE') {
           if (!accounts) return json(res, 503, { error: 'Account deletion is unavailable' });
-          requireSameOrigin(req, config);
           return json(res, 200, await accounts.deleteUser(params.userId, (await bodyJson(req)).confirmation, { actor: 'administrator' }));
         }
         params = routeMatch(pathname, '/api/admin/lessons/:lessonId/review');
@@ -285,9 +359,9 @@ export function createServer({ config, store, learning, books = null, bookFiles 
       if (pathname.startsWith('/api/')) {
         const user = currentUser(req);
         if (!user) return json(res, 401, { error: 'Private user access required' });
+        if (isMutation(req.method)) requireSameOrigin(req, config);
         if (pathname === '/api/account' && req.method === 'DELETE') {
           if (!accounts) return json(res, 503, { error: 'Account deletion is unavailable' });
-          requireSameOrigin(req, config);
           const result = await accounts.deleteUser(user.id, (await bodyJson(req)).confirmation, { actor: 'learner' });
           return jsonWithCookie(res, 200, result, cookie('kp_user', '', { secure: config.nodeEnv === 'production', maxAge: 0 }));
         }
@@ -448,10 +522,11 @@ export function createServer({ config, store, learning, books = null, bookFiles 
 
       send(res, 404, 'Not found');
     } catch (error) {
-      logger.error({ method: req.method, url: req.url, error: error.stack || error.message, durationMs: Date.now() - started }, 'Request failed');
       const status = statusForError(error);
+      logger.error({ method: req.method, path: requestPath, requestId, status, error: error.stack || error.message, durationMs: Date.now() - started }, 'Request failed');
+      if (status >= 500) return json(res, status, { error: 'Internal server error' });
       json(res, status, {
-        error: error.message || 'Internal server error',
+        error: error.message || 'Request failed',
         ...(error.code ? { code: error.code } : {}),
         ...(error.retryable !== undefined ? { retryable: Boolean(error.retryable) } : {}),
         ...(Array.isArray(error.details) ? { details: error.details } : {}),
@@ -460,6 +535,11 @@ export function createServer({ config, store, learning, books = null, bookFiles 
       });
     }
   });
+
+  server.requestTimeout = 120_000;
+  server.headersTimeout = 30_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxHeadersCount = 100;
 
   function jsonWithCookie(res, status, data, setCookie) {
     send(res, status, JSON.stringify(data), { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': setCookie });
