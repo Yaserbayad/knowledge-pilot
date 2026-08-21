@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ensureTriggerIntent, taskFingerprint } from '../src/trigger-safety.mjs';
+import { canDeclareQueueEmpty, ensureTriggerIntent, taskFingerprint } from '../src/trigger-safety.mjs';
 
 const options = {
   maxTasks: 4,
@@ -59,4 +59,11 @@ test('changed queue never replaces an unresolved prior trigger intent', () => {
   assert.equal(retry.intent.idempotencyKey, first.intent.idempotencyKey);
   assert.equal(retry.intent.fingerprint, taskFingerprint(queueA));
   assert.deepEqual(retry.intent.request, first.intent.request);
+});
+
+test('an empty pending queue is not authoritative while a run or trigger outcome is unresolved', () => {
+  assert.equal(canDeclareQueueEmpty({ activeRun: { runId: 'run_1' } }, []), false);
+  assert.equal(canDeclareQueueEmpty({ triggerIntent: { idempotencyKey: 'idem_1' } }, []), false);
+  assert.equal(canDeclareQueueEmpty({}, []), true);
+  assert.equal(canDeclareQueueEmpty({}, queueA), false);
 });
