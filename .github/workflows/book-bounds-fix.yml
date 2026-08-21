@@ -8,41 +8,6 @@ permissions:
   contents: write
 
 jobs:
-  refresh-helper-deps:
-    if: ${{ github.head_ref == 'ci/book-bounds-helper' && github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: automation/workspace-agent/package-lock.json
-      - name: Regenerate lockfile from exact security overrides
-        working-directory: automation/workspace-agent
-        run: npm install --package-lock-only --ignore-scripts
-      - name: Install and verify Workspace Agent
-        working-directory: automation/workspace-agent
-        run: |
-          npm ci --ignore-scripts
-          npm run check
-          npm audit --omit=dev --audit-level=high
-      - name: Commit lockfile when refreshed
-        run: |
-          git diff --check
-          if git diff --quiet -- automation/workspace-agent/package-lock.json; then
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add automation/workspace-agent/package-lock.json
-          git diff --cached --check
-          git commit -m 'fix: refresh patched workspace bridge lockfile [helper-deps]'
-          git push origin HEAD:ci/book-bounds-helper
-
   patch-and-verify:
     if: ${{ github.head_ref == 'audit/comprehensive-hardening' && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-24.04
