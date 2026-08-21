@@ -1,9 +1,11 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
+import { readResponseText } from './http-response.mjs';
 import { KnowledgePilotClient } from './knowledge-pilot-client.mjs';
+import { ensureTriggerIntent } from './trigger-safety.mjs';
 
+const MAX_WORKSPACE_RESPONSE_BYTES = 2 * 1024 * 1024;
 const config = loadConfig({ requireTrigger: true });
 const client = new KnowledgePilotClient(config.knowledgePilot);
 const stateFile = path.join(config.runtime.stateDir, 'trigger-state.json');
@@ -37,24 +39,6 @@ function secondsSince(value) {
   return Number.isFinite(timestamp) ? Math.max(0, (Date.now() - timestamp) / 1000) : Infinity;
 }
 
-function taskFingerprint(tasks) {
-  return crypto.createHash('sha256')
-    .update(tasks.map((task) => `${task.id}:${task.updatedAt || task.createdAt || ''}`).join('|'))
-    .digest('hex')
-    .slice(0, 32);
-}
-
-function idempotencyKey(fingerprint) {
-  return crypto.createHash('sha256')
-    .update(`${fingerprint}:${new Date().toISOString()}:${crypto.randomUUID()}`)
-    .digest('hex');
-}
-
-function dailyConversationKey() {
-  const day = new Date().toISOString().slice(0, 10);
-  return `${config.workspaceAgent.conversationPrefix}-${day}`;
-}
-
 async function workspaceRequest(pathname, { method = 'GET', body, beta = false } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
@@ -70,10 +54,11 @@ async function workspaceRequest(pathname, { method = 'GET', body, beta = false }
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal
     });
-    const raw = await response.text();
+    const raw = await readResponseText(response, MAX_WORKSPACE_RESPONSE_BYTES, 'Workspace Agent response');
     let payload = null;
     if (raw) {
-      try { payload = JSON.parse(raw); } catch { payload = null; }
+      try { payload = JSON.parse(raw); }
+      catch { throw new Error(`Workspace Agent API returned invalid JSON (HTTP ${response.status})`); }
     }
     if (!response.ok) {
       const error = new Error(`Workspace Agent API returned HTTP ${response.status}`);
@@ -82,6 +67,9 @@ async function workspaceRequest(pathname, { method = 'GET', body, beta = false }
       throw error;
     }
     return payload || {};
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('Workspace Agent API request timed out');
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
@@ -93,41 +81,45 @@ async function pollRun(runId) {
   );
 }
 
-async function triggerAgent(tasks, key) {
-  const types = [...new Set(tasks.slice(0, config.policy.maxTasks).map((task) => task.type))];
-  const input = [
-    `Process up to ${config.policy.maxTasks} pending Knowledge Pilot tasks autonomously.`,
-    'Start by listing pending tasks and process them in descending priority, one at a time.',
-    'For each task: load context, claim it, perform careful web research when required, follow the dynamic result contract, run adversarial review and final audit, then submit through the correct tool.',
-    'Correct and resubmit retryable HTTP 422 or contract errors. Report failure only for genuine evidence or safety impossibility.',
-    `Expected pending task types include: ${types.join(', ') || 'unknown'}.`,
-    'Stop after the task limit or when the pending queue is empty. Do not ask the user to confirm routine Knowledge Pilot tool actions.'
-  ].join(' ');
-
+async function triggerAgent(intent) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
+  let response;
   try {
-    const response = await fetch(
-      `${config.workspaceAgent.apiBase}/workspace_agents/${encodeURIComponent(config.workspaceAgent.triggerId)}/trigger`,
-      {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${config.workspaceAgent.accessToken}`,
-          'content-type': 'application/json',
-          accept: 'application/json',
-          'Idempotency-Key': key,
-          ...(config.workspaceAgent.useBetaRunStatus
-            ? { 'OpenAI-Beta': 'workspace_agent_runs=v1' }
-            : {})
-        },
-        body: JSON.stringify({
-          conversation_key: dailyConversationKey(),
-          input
-        }),
-        signal: controller.signal
-      }
-    );
-    const raw = await response.text();
+    try {
+      response = await fetch(
+        `${config.workspaceAgent.apiBase}/workspace_agents/${encodeURIComponent(config.workspaceAgent.triggerId)}/trigger`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${config.workspaceAgent.accessToken}`,
+            'content-type': 'application/json',
+            accept: 'application/json',
+            'Idempotency-Key': intent.idempotencyKey,
+            ...(config.workspaceAgent.useBetaRunStatus
+              ? { 'OpenAI-Beta': 'workspace_agent_runs=v1' }
+              : {})
+          },
+          body: JSON.stringify(intent.request),
+          signal: controller.signal
+        }
+      );
+    } catch (error) {
+      const wrapped = new Error(error?.name === 'AbortError'
+        ? 'Workspace Agent trigger timed out before acceptance could be confirmed'
+        : `Workspace Agent trigger failed before acceptance could be confirmed: ${error?.message || 'network error'}`);
+      wrapped.outcomeUnknown = true;
+      throw wrapped;
+    }
+
+    let raw;
+    try {
+      raw = await readResponseText(response, MAX_WORKSPACE_RESPONSE_BYTES, 'Workspace Agent trigger response');
+    } catch (error) {
+      error.status = response.status;
+      error.outcomeUnknown = response.status === 202;
+      throw error;
+    }
     let payload = {};
     if (raw) {
       try { payload = JSON.parse(raw); } catch { payload = {}; }
@@ -136,6 +128,7 @@ async function triggerAgent(tasks, key) {
       const error = new Error(`Workspace Agent trigger returned HTTP ${response.status}`);
       error.status = response.status;
       error.code = payload?.error?.code || payload?.code || null;
+      error.definitiveRejected = true;
       throw error;
     }
     return payload;
@@ -171,6 +164,7 @@ async function telegramAlert(tasks, message) {
         }
       );
       if (!response.ok) log('telegram_alert_failed', { status: response.status });
+      await response.body?.cancel().catch(() => {});
     } catch (error) {
       log('telegram_alert_failed', { message: String(error?.message || 'unknown').slice(0, 300) });
     }
@@ -199,6 +193,20 @@ async function acquireLock() {
   }
 }
 
+async function markRunUnresolved(state, pending, reason) {
+  const active = state.activeRun;
+  if (!active) return;
+  active.unresolvedAt ||= new Date().toISOString();
+  active.unresolvedReason = String(reason || 'Workspace Agent run outcome could not be confirmed').slice(0, 500);
+  await alertOnce(
+    state,
+    pending,
+    `run-unresolved:${active.runId || active.idempotencyKey || active.triggeredAt}`,
+    'Knowledge Pilot cannot confirm the outcome of an earlier Workspace Agent run. It will not start another run automatically because doing so could overlap or duplicate processing. Review the bridge state or Workspace Agent run before retrying.'
+  );
+  await writeState(state);
+}
+
 async function main() {
   await fs.mkdir(config.runtime.stateDir, { recursive: true, mode: 0o700 });
   const lock = await acquireLock();
@@ -212,6 +220,7 @@ async function main() {
     const pending = await client.listTasks({ status: 'pending', limit: 100 });
     if (!pending.length) {
       state.activeRun = null;
+      state.triggerIntent = null;
       state.lastEmptyAt = new Date().toISOString();
       await writeState(state);
       log('queue_empty');
@@ -248,7 +257,7 @@ async function main() {
               state,
               pending,
               `failed:${state.activeRun.runId}`,
-              'Knowledge Pilot automation failed before clearing its pending work. The server will retry after the safety backoff; check the Workspace Agent run if the notice repeats.'
+              'Knowledge Pilot automation failed before clearing its pending work. The bridge will respect the safety backoff before attempting another run.'
             );
             state.lastErrorAt = new Date().toISOString();
             state.activeRun = null;
@@ -259,25 +268,35 @@ async function main() {
           if (run.status === 'completed') {
             state.lastCompletedAt = new Date().toISOString();
             state.activeRun = null;
+            await writeState(state);
           } else if (age < config.policy.staleSeconds) {
             await writeState(state);
             log('run_status_unknown', { status: run.status || 'missing' });
             return;
           } else {
-            state.activeRun = null;
+            await markRunUnresolved(state, pending, `Unrecognized run status after stale threshold: ${run.status || 'missing'}`);
+            log('run_outcome_unresolved', { status: run.status || 'missing' });
+            return;
           }
         } catch (error) {
+          state.activeRun.lastStatusCheckError = String(error?.message || 'unknown').slice(0, 500);
+          state.activeRun.lastCheckedAt = new Date().toISOString();
           if (age < config.policy.staleSeconds) {
+            await writeState(state);
             log('run_status_check_failed', { status: error?.status || null });
             return;
           }
-          state.activeRun = null;
+          await markRunUnresolved(state, pending, state.activeRun.lastStatusCheckError);
+          log('run_outcome_unresolved', { status: error?.status || null });
+          return;
         }
       } else if (age < config.policy.staleSeconds) {
         log('run_cooldown_without_status', { ageSeconds: Math.round(age) });
         return;
       } else {
-        state.activeRun = null;
+        await markRunUnresolved(state, pending, 'No authoritative run-status identifier is available after the stale threshold');
+        log('run_outcome_unresolved', { status: 'unavailable' });
+        return;
       }
     }
 
@@ -290,26 +309,50 @@ async function main() {
       return;
     }
 
-    const fingerprint = taskFingerprint(pending);
-    const key = idempotencyKey(fingerprint);
+    const prepared = ensureTriggerIntent(state, pending, {
+      maxTasks: config.policy.maxTasks,
+      conversationPrefix: config.workspaceAgent.conversationPrefix
+    });
+    if (prepared.created) {
+      // This durable write must complete before the external POST. If the POST
+      // later has an unknown outcome, the next invocation reuses this exact
+      // idempotency key and request instead of creating a potentially duplicate run.
+      await writeState(state);
+    } else if (secondsSince(prepared.intent.createdAt) >= config.policy.staleSeconds) {
+      await alertOnce(
+        state,
+        pending,
+        `trigger-intent-unresolved:${prepared.intent.idempotencyKey}`,
+        'Knowledge Pilot cannot confirm whether an earlier Workspace Agent trigger was accepted. It will not create a new idempotency key or start overlapping work automatically.'
+      );
+      await writeState(state);
+      log('trigger_intent_unresolved', { queueChanged: prepared.queueChanged });
+      return;
+    } else if (prepared.queueChanged) {
+      log('trigger_retry_queue_changed', { pending: pending.length });
+    }
+
     try {
-      const accepted = await triggerAgent(pending, key);
+      const accepted = await triggerAgent(prepared.intent);
       const runId = accepted.agent_trigger_run_id || null;
       state.lastTriggeredAt = new Date().toISOString();
       state.activeRun = {
         triggeredAt: state.lastTriggeredAt,
-        fingerprint,
-        idempotencyKey: key,
+        fingerprint: prepared.intent.fingerprint,
+        idempotencyKey: prepared.intent.idempotencyKey,
         runId,
         conversationUrl: accepted.conversation_url || null,
-        taskCountAtTrigger: pending.length,
+        taskCountAtTrigger: prepared.intent.taskCount,
         lastStatus: 'queued'
       };
+      state.triggerIntent = null;
       state.lastErrorAt = null;
+      state.lastTriggerError = null;
       await writeState(state);
       log('trigger_accepted', {
         pending: pending.length,
-        runStatusAvailable: Boolean(runId)
+        runStatusAvailable: Boolean(runId),
+        reusedIntent: !prepared.created
       });
     } catch (error) {
       state.lastErrorAt = new Date().toISOString();
@@ -317,13 +360,18 @@ async function main() {
         at: state.lastErrorAt,
         status: error?.status || null,
         code: error?.code || null,
+        outcomeUnknown: Boolean(error?.outcomeUnknown),
+        definitiveRejected: Boolean(error?.definitiveRejected),
+        idempotencyKey: prepared.intent.idempotencyKey,
         message: String(error?.message || 'unknown').slice(0, 500)
       };
       await alertOnce(
         state,
         pending,
-        `trigger-error:${error?.status || 'network'}:${error?.code || 'unknown'}`,
-        'Knowledge Pilot could not start its autonomous research agent. Pending work is safe and will retry automatically. Check the server automation if this notice repeats.'
+        `trigger-error:${prepared.intent.idempotencyKey}`,
+        error?.outcomeUnknown
+          ? 'Knowledge Pilot could not confirm whether its Workspace Agent trigger was accepted. The exact trigger intent and idempotency key were preserved; any automatic retry will reuse them rather than start duplicate work.'
+          : 'Knowledge Pilot could not start its Workspace Agent. The exact trigger intent remains durable for a safe retry after the backoff.'
       );
       await writeState(state);
       throw error;
