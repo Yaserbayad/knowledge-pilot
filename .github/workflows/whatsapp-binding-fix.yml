@@ -1,0 +1,135 @@
+name: Apply verified WhatsApp binding hardening
+
+on:
+  push:
+    branches: [fix/whatsapp-binding-hardening]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[whatsapp-binding-fix]') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Apply exact source transformations
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one source match, found {count}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once('src/services/learning.js', r'''  bindingLinks(user) {
+            const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
+            const telegramToken = createBindingToken(this.config.appSecret, user.id, 'telegram', expiresAt);
+            return {
+              telegramToken,
+              whatsappCode: user.whatsappLinkCode,
+              whatsappNumber: this.config.whatsapp.dedicatedNumber
+            };
+          }
+''', r'''  bindingLinks(user) {
+            const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
+            const telegramToken = createBindingToken(this.config.appSecret, user.id, 'telegram', expiresAt);
+            const whatsappToken = createBindingToken(this.config.appSecret, user.id, 'whatsapp', expiresAt);
+            return {
+              telegramToken,
+              whatsappCode: whatsappToken,
+              whatsappNumber: this.config.whatsapp.dedicatedNumber
+            };
+          }
+''')
+
+          replace_once('src/index.js', r'''const whatsapp = new WhatsAppChannel({ config: { ...config.whatsapp, cardDir: config.cardDir }, store, learning, books, logger });''', r'''const whatsapp = new WhatsAppChannel({ config: { ...config.whatsapp, appSecret: config.appSecret, cardDir: config.cardDir }, store, learning, books, logger });''')
+
+          replace_once('src/channels/whatsapp.js', r'''import path from 'node:path';
+          import { formatBookSessionText, normalizePhone, sleep } from '../utils.js';
+''', r'''import path from 'node:path';
+          import { verifyBindingToken } from '../auth.js';
+          import { formatBookSessionText, normalizePhone, sleep } from '../utils.js';
+''')
+
+          replace_once('src/channels/whatsapp.js', r'''    const linkMatch = text.match(/^LINK\s+([A-Z0-9]{6,12})$/i);
+              if (linkMatch) {
+                const code = linkMatch[1].toUpperCase();
+                const user = this.store.read((state) => Object.values(state.users).find((u) => u.whatsappLinkCode === code));
+                if (!user) return this.sendText(jid, 'Invalid Knowledge Pilot linking code.');
+                await this.store.transaction((state) => {
+                  const target = state.users[user.id];
+                  target.whatsappJid = jid;
+                  target.channels.whatsapp = true;
+                  target.whatsappLinkCode = Math.random().toString(36).slice(2, 10).toUpperCase();
+                  target.updatedAt = new Date().toISOString();
+                  return target;
+                });
+                return this.sendText(jid, 'WhatsApp is linked to your Knowledge Pilot profile.');
+              }
+''', r'''    const linkMatch = text.match(/^LINK\s+([A-Za-z0-9_-]{20,128})$/);
+              if (linkMatch) {
+                const binding = this.config.appSecret
+                  ? verifyBindingToken(this.config.appSecret, linkMatch[1], 'whatsapp')
+                  : null;
+                if (!binding) return this.sendText(jid, 'Invalid or expired Knowledge Pilot linking token.');
+                const linked = await this.store.transaction((state) => {
+                  const target = state.users?.[binding.userId];
+                  if (!target) return false;
+                  for (const candidate of Object.values(state.users || {})) {
+                    if (candidate.id !== target.id && candidate.whatsappJid === jid) {
+                      candidate.whatsappJid = null;
+                      candidate.channels ||= {};
+                      candidate.channels.whatsapp = false;
+                      candidate.updatedAt = new Date().toISOString();
+                    }
+                  }
+                  target.whatsappJid = jid;
+                  target.channels ||= {};
+                  target.channels.whatsapp = true;
+                  target.whatsappLinkCode = null;
+                  target.updatedAt = new Date().toISOString();
+                  return true;
+                });
+                if (!linked) return this.sendText(jid, 'Invalid or expired Knowledge Pilot linking token.');
+                return this.sendText(jid, 'WhatsApp is linked to your Knowledge Pilot profile.');
+              }
+              if (/^LINK\b/i.test(text)) return this.sendText(jid, 'Invalid or expired Knowledge Pilot linking token.');
+''')
+          PY
+      - name: Verify exact diff scope
+        run: |
+          git diff --check
+          test "$(git diff --name-only | sort | tr '\n' ' ')" = "src/channels/whatsapp.js src/index.js src/services/learning.js "
+      - name: Install root dependencies
+        run: npm ci --ignore-scripts
+      - name: Verify root application
+        run: npm run check
+      - name: Audit root production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Install workspace dependencies
+        working-directory: automation/workspace-agent
+        run: npm ci --ignore-scripts
+      - name: Verify Workspace Agent
+        working-directory: automation/workspace-agent
+        run: npm run check
+      - name: Audit Workspace Agent production dependencies
+        working-directory: automation/workspace-agent
+        run: npm audit --omit=dev --audit-level=high
+      - name: Commit verified hardening and remove temporary workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/channels/whatsapp.js src/index.js src/services/learning.js
+          git rm .github/workflows/whatsapp-binding-fix.yml
+          git diff --cached --check
+          git commit -m 'fix: harden WhatsApp account binding [whatsapp-binding-fix]'
+          git push origin HEAD:fix/whatsapp-binding-hardening
