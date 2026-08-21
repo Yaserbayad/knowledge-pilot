@@ -41,7 +41,7 @@ function assertActiveTaskContext(state, task) {
   return activeTask;
 }
 
-function completeActiveTask(state, task, resultRef, { submissionDiagnostics = null, acceptedResult = null } = {}) {
+function completeActiveTask(state, task, resultRef, { submissionDiagnostics = null } = {}) {
   const target = assertActiveTaskContext(state, task);
   target.status = 'completed';
   target.completedAt = nowIso();
@@ -50,7 +50,7 @@ function completeActiveTask(state, task, resultRef, { submissionDiagnostics = nu
   target.error = null;
   target.lastSubmissionError = null;
   target.acceptedSubmission = submissionDiagnostics ? { ...submissionDiagnostics, acceptedAt: nowIso() } : null;
-  if (acceptedResult !== null) target.acceptedResult = acceptedResult;
+  delete target.acceptedResult;
   target.updatedAt = nowIso();
   return target;
 }
@@ -764,7 +764,7 @@ export class BusinessActionsService {
           metadata: { bookId: target.id }
         });
       }
-      completeActiveTask(state, task, target.id, { submissionDiagnostics, acceptedResult: result });
+      completeActiveTask(state, task, target.id, { submissionDiagnostics });
       return target;
     });
     return { kind: 'book_analysis', book, plan, requiresOwnedCopy: book.status === 'source_required' };
