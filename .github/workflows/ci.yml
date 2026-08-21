@@ -18,10 +18,10 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      - name: Pin npm 10 verification toolchain
+      - name: Pin npm 12.0.1 verification toolchain
         run: |
-          npm install --global npm@10.9.9
-          test "$(npm --version)" = "10.9.9"
+          npm install --global npm@12.0.1
+          test "$(npm --version)" = "12.0.1"
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts
       - name: Application checks and tests
@@ -41,10 +41,10 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: automation/workspace-agent/package-lock.json
-      - name: Pin npm 10 verification toolchain
+      - name: Pin npm 12.0.1 verification toolchain
         run: |
-          npm install --global npm@10.9.9
-          test "$(npm --version)" = "10.9.9"
+          npm install --global npm@12.0.1
+          test "$(npm --version)" = "12.0.1"
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts
       - name: Workspace Agent checks and tests
