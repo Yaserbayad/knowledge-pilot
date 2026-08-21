@@ -7,13 +7,11 @@ test('bounded fetch reader returns bodies within the byte limit', async () => {
   assert.equal(await readFetchText(response, 64, 'Test response'), 'hello world');
 });
 
-test('bounded fetch reader rejects and cancels when the byte limit is exceeded', async () => {
+test('bounded fetch reader rejects and cancels a live stream when the byte limit is exceeded', async () => {
   let cancelled = false;
   const response = new Response(new ReadableStream({
-    start(controller) {
+    pull(controller) {
       controller.enqueue(new Uint8Array(40));
-      controller.enqueue(new Uint8Array(40));
-      controller.close();
     },
     cancel() { cancelled = true; }
   }));
