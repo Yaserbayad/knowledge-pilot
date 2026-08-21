@@ -3,7 +3,7 @@ import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { readResponseText } from './http-response.mjs';
 import { KnowledgePilotClient } from './knowledge-pilot-client.mjs';
-import { ensureTriggerIntent } from './trigger-safety.mjs';
+import { canDeclareQueueEmpty, ensureTriggerIntent } from './trigger-safety.mjs';
 
 const MAX_WORKSPACE_RESPONSE_BYTES = 2 * 1024 * 1024;
 const config = loadConfig({ requireTrigger: true });
@@ -207,6 +207,14 @@ async function markRunUnresolved(state, pending, reason) {
   await writeState(state);
 }
 
+async function clearEmptyQueue(state) {
+  state.activeRun = null;
+  state.triggerIntent = null;
+  state.lastEmptyAt = new Date().toISOString();
+  await writeState(state);
+  log('queue_empty');
+}
+
 async function main() {
   await fs.mkdir(config.runtime.stateDir, { recursive: true, mode: 0o700 });
   const lock = await acquireLock();
@@ -218,12 +226,8 @@ async function main() {
   try {
     const state = await readJson(stateFile, {});
     const pending = await client.listTasks({ status: 'pending', limit: 100 });
-    if (!pending.length) {
-      state.activeRun = null;
-      state.triggerIntent = null;
-      state.lastEmptyAt = new Date().toISOString();
-      await writeState(state);
-      log('queue_empty');
+    if (canDeclareQueueEmpty(state, pending)) {
+      await clearEmptyQueue(state);
       return;
     }
 
@@ -298,6 +302,11 @@ async function main() {
         log('run_outcome_unresolved', { status: 'unavailable' });
         return;
       }
+    }
+
+    if (canDeclareQueueEmpty(state, pending)) {
+      await clearEmptyQueue(state);
+      return;
     }
 
     if (secondsSince(state.lastErrorAt) < config.policy.errorBackoffSeconds) {
