@@ -1,3 +1,5 @@
+import { readResponseText } from './http-response.mjs';
+
 const SAFE_ID = /^[A-Za-z0-9_-]{1,160}$/;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
@@ -39,34 +41,31 @@ export class KnowledgePilotClient {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal
       });
+      const raw = await readResponseText(response, MAX_RESPONSE_BYTES, 'Knowledge Pilot response');
+      let payload = null;
+      if (raw) {
+        try {
+          payload = JSON.parse(raw);
+        } catch {
+          throw new Error(`Knowledge Pilot returned invalid JSON (HTTP ${response.status})`);
+        }
+      }
+      if (!response.ok) {
+        const error = new Error(
+          payload?.message || payload?.error || `Knowledge Pilot returned HTTP ${response.status}`
+        );
+        error.status = response.status;
+        error.details = payload;
+        throw error;
+      }
+      return payload;
     } catch (error) {
       if (error?.name === 'AbortError') throw new Error('Knowledge Pilot request timed out');
+      if (Number.isInteger(error?.status) || /safe size limit|invalid JSON/.test(String(error?.message || ''))) throw error;
       throw new Error(`Knowledge Pilot request failed: ${error?.message || 'network error'}`);
     } finally {
       clearTimeout(timeout);
     }
-
-    const raw = await response.text();
-    if (Buffer.byteLength(raw, 'utf8') > MAX_RESPONSE_BYTES) {
-      throw new Error('Knowledge Pilot response exceeded the safe size limit');
-    }
-    let payload = null;
-    if (raw) {
-      try {
-        payload = JSON.parse(raw);
-      } catch {
-        throw new Error(`Knowledge Pilot returned invalid JSON (HTTP ${response.status})`);
-      }
-    }
-    if (!response.ok) {
-      const error = new Error(
-        payload?.message || payload?.error || `Knowledge Pilot returned HTTP ${response.status}`
-      );
-      error.status = response.status;
-      error.details = payload;
-      throw error;
-    }
-    return payload;
   }
 
   health() {
