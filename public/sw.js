@@ -1,4 +1,4 @@
-const CACHE = 'knowledge-pilot-shell-v1.4.1';
+const CACHE = 'knowledge-pilot-shell-v1.4.2';
 const SHELL = ['/app', '/assets/styles.css', '/assets/theme-init.js', '/assets/theme.js', '/assets/app.js', '/assets/lesson-experience.js'];
 
 self.addEventListener('install', (event) => {
