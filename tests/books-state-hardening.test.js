@@ -28,12 +28,26 @@ async function fixture() {
   return { store, learning, books, actions };
 }
 
+function failWhenNewAnalysisTaskAppears(store, message, ignoreTaskId = null) {
+  const original = store.transaction.bind(store);
+  let injected = false;
+  store.transaction = (mutator) => original(async (state) => {
+    const before = new Set(Object.keys(state.businessTasks || {}));
+    const value = await mutator(state);
+    const added = Object.values(state.businessTasks || {}).find((task) =>
+      !before.has(task.id) && task.id !== ignoreTaskId && task.type === 'book_analysis' && ['pending', 'claimed'].includes(task.status));
+    if (!injected && added) {
+      injected = true;
+      throw new Error(message);
+    }
+    return value;
+  });
+}
+
 test('book creation and its initial analysis task are one atomic state transition', async () => {
-  const { store, learning, books, actions } = await fixture();
+  const { store, learning, books } = await fixture();
   const { user } = await learning.createUser({ name: 'Atomic Book Learner' });
-  const failure = new Error('simulated task creation failure');
-  actions.queueBookAnalysis = async () => { throw failure; };
-  actions.queueInState = () => { throw failure; };
+  failWhenNewAnalysisTaskAppears(store, 'simulated task creation failure');
 
   await assert.rejects(books.addBook(user.id, { title: 'Atomic Book', author: 'Writer' }), /task creation failure/);
   assert.equal(Object.values(store.snapshot().books).length, 0);
@@ -41,13 +55,11 @@ test('book creation and its initial analysis task are one atomic state transitio
 });
 
 test('forced re-analysis preserves the existing task when replacement task creation fails', async () => {
-  const { store, learning, books, actions } = await fixture();
+  const { store, learning, books } = await fixture();
   const { user } = await learning.createUser({ name: 'Reanalysis Learner' });
   const added = await books.addBook(user.id, { title: 'Reanalysis Book', author: 'Writer' });
   const originalTaskId = added.task.id;
-  const failure = new Error('simulated replacement task failure');
-  actions.queueBookAnalysis = async () => { throw failure; };
-  actions.queueInState = () => { throw failure; };
+  failWhenNewAnalysisTaskAppears(store, 'simulated replacement task failure', originalTaskId);
 
   await assert.rejects(books.queueAnalysis(user.id, added.book.id, { force: true }), /replacement task failure/);
   const state = store.snapshot();
