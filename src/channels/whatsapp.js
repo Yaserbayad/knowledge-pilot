@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { verifyBindingToken } from '../auth.js';
 import { formatBookSessionText, normalizePhone, sleep } from '../utils.js';
 
 function messageText(message) {
@@ -165,21 +166,34 @@ ${actionUrl}` : ''}`);
     if (!jid || jid.endsWith('@g.us')) return;
     const text = messageText(message).trim();
     if (!text) return;
-    const linkMatch = text.match(/^LINK\s+([A-Z0-9]{6,12})$/i);
+    const linkMatch = text.match(/^LINK\s+([A-Za-z0-9_-]{20,128})$/);
     if (linkMatch) {
-      const code = linkMatch[1].toUpperCase();
-      const user = this.store.read((state) => Object.values(state.users).find((u) => u.whatsappLinkCode === code));
-      if (!user) return this.sendText(jid, 'Invalid Knowledge Pilot linking code.');
-      await this.store.transaction((state) => {
-        const target = state.users[user.id];
+      const binding = this.config.appSecret
+        ? verifyBindingToken(this.config.appSecret, linkMatch[1], 'whatsapp')
+        : null;
+      if (!binding) return this.sendText(jid, 'Invalid or expired Knowledge Pilot linking token.');
+      const linked = await this.store.transaction((state) => {
+        const target = state.users?.[binding.userId];
+        if (!target) return false;
+        for (const candidate of Object.values(state.users || {})) {
+          if (candidate.id !== target.id && candidate.whatsappJid === jid) {
+            candidate.whatsappJid = null;
+            candidate.channels ||= {};
+            candidate.channels.whatsapp = false;
+            candidate.updatedAt = new Date().toISOString();
+          }
+        }
         target.whatsappJid = jid;
+        target.channels ||= {};
         target.channels.whatsapp = true;
-        target.whatsappLinkCode = Math.random().toString(36).slice(2, 10).toUpperCase();
+        target.whatsappLinkCode = null;
         target.updatedAt = new Date().toISOString();
-        return target;
+        return true;
       });
+      if (!linked) return this.sendText(jid, 'Invalid or expired Knowledge Pilot linking token.');
       return this.sendText(jid, 'WhatsApp is linked to your Knowledge Pilot profile.');
     }
+    if (/^LINK\b/i.test(text)) return this.sendText(jid, 'Invalid or expired Knowledge Pilot linking token.');
     const user = this.store.read((state) => Object.values(state.users).find((u) => u.whatsappJid === jid));
     if (!user) return this.sendText(jid, 'Send LINK followed by the code shown on your private Knowledge Pilot page.');
     const approve = text.match(/^APPROVE\s+(plan_[a-z0-9]+)$/i);
