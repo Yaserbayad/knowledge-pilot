@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${1:-/www/wwwroot/knowledge-pilot}"
+APP_DIR="${1:-/www/wwwroot/knowledgepilot}"
 cd "$APP_DIR"
 
 if ! command -v node >/dev/null 2>&1; then
@@ -15,20 +15,22 @@ if [ "$NODE_MAJOR" -lt 22 ]; then
   exit 1
 fi
 
-if [ ! -f .env ]; then
-  cp .env.example .env
-  echo "Created .env. Edit it before starting the service." >&2
+if [ ! -f package-lock.json ]; then
+  echo "package-lock.json is required for a reproducible deployment." >&2
+  exit 1
 fi
 
-npm install --omit=dev
+if [ ! -f .env ]; then
+  echo ".env is required. Refusing to create or guess production configuration." >&2
+  exit 1
+fi
+
+npm ci --omit=dev --ignore-scripts
 mkdir -p data/backups data/cards data/book-files data/whatsapp-auth
 chmod 700 data data/backups data/cards data/book-files data/whatsapp-auth
 chmod 600 .env
 
-if command -v pm2 >/dev/null 2>&1; then
-  pm2 start ecosystem.config.cjs
-  pm2 save
-  echo "Knowledge Pilot started with PM2."
-else
-  echo "PM2 is not installed. In aaPanel Node Project, set startup file to src/index.js." >&2
-fi
+node scripts/verify-config.js
+npm run check
+
+echo "Knowledge Pilot release preparation passed. Process manager configuration and running processes were left unchanged."
