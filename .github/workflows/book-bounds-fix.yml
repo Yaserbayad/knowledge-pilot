@@ -1,0 +1,143 @@
+name: Apply verified book verification bounds fix
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: ${{ github.head_ref == 'audit/comprehensive-hardening' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - id: gate
+        name: Check one-time trigger
+        run: |
+          if [ -f .github/book-verification-bounds-trigger ]; then
+            echo 'apply=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'apply=false' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.apply == 'true'
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Apply bounded book verification normalization
+        if: steps.gate.outputs.apply == 'true'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/services/books.js')
+          text = path.read_text()
+
+          clean_list = """function cleanList(value, max = 20, itemMax = 1000) {
+            return Array.isArray(value) ? value.map((item) => clean(item, itemMax)).filter(Boolean).slice(0, max) : [];
+          }
+          """
+          helper = """
+          function normalizeBookVerification(value, mode) {
+            const verification = value && typeof value === 'object' ? value : {};
+            const adversarialReview = verification.adversarialReview && typeof verification.adversarialReview === 'object'
+              ? verification.adversarialReview
+              : {};
+            const finalAudit = verification.finalAudit && typeof verification.finalAudit === 'object'
+              ? verification.finalAudit
+              : {};
+            const common = {
+              researchApproach: clean(verification.researchApproach, 3000),
+              sourceLimitations: cleanList(verification.sourceLimitations, 12, 1000),
+              adversarialReview: {
+                issuesFound: cleanList(adversarialReview.issuesFound, 12, 1000),
+                correctionsMade: cleanList(adversarialReview.correctionsMade, 12, 1000),
+                unresolvedIssues: cleanList(adversarialReview.unresolvedIssues, 12, 1000)
+              },
+              finalAudit: {
+                accuracyPassed: finalAudit.accuracyPassed === true,
+                sourceTraceabilityPassed: finalAudit.sourceTraceabilityPassed === true,
+                completenessPassed: finalAudit.completenessPassed === true,
+                learnerFitPassed: finalAudit.learnerFitPassed === true,
+                noFabricationPassed: finalAudit.noFabricationPassed === true
+              }
+            };
+            if (mode === 'analysis') {
+              return {
+                researchApproach: common.researchApproach,
+                editionConfidence: ['high', 'medium', 'low'].includes(verification.editionConfidence) ? verification.editionConfidence : 'low',
+                sourceLimitations: common.sourceLimitations,
+                adversarialReview: common.adversarialReview,
+                finalAudit: common.finalAudit
+              };
+            }
+            return {
+              researchApproach: common.researchApproach,
+              authorFaithfulness: clean(verification.authorFaithfulness, 3000),
+              criticismBasis: clean(verification.criticismBasis, 3000),
+              sourceLimitations: common.sourceLimitations,
+              adversarialReview: common.adversarialReview,
+              finalAudit: common.finalAudit
+            };
+          }
+          """
+          if 'function normalizeBookVerification(' not in text:
+              if clean_list not in text:
+                  raise SystemExit('cleanList insertion anchor not found')
+              text = text.replace(clean_list, clean_list + helper, 1)
+
+          analysis_anchor = """export function normalizeBookAnalysis(raw, book, user) {
+            const metadata = raw.metadata || {};
+            const plan = raw.plan || {};
+            const sessions = Array.isArray(plan.sessions) ? plan.sessions.slice(0, 36) : [];
+          """
+          analysis_replacement = analysis_anchor + "  if (raw && typeof raw === 'object') raw.verification = normalizeBookVerification(raw.verification, 'analysis');\n"
+          if "normalizeBookVerification(raw.verification, 'analysis')" not in text:
+              if analysis_anchor not in text:
+                  raise SystemExit('book analysis anchor not found')
+              text = text.replace(analysis_anchor, analysis_replacement, 1)
+
+          session_anchor = """export function normalizeBookSession(raw, book, planItem, user, sources = []) {
+            const content = raw.content || {};
+          """
+          session_replacement = session_anchor + "  if (raw && typeof raw === 'object') raw.verification = normalizeBookVerification(raw.verification, 'session');\n"
+          if "normalizeBookVerification(raw.verification, 'session')" not in text:
+              if session_anchor not in text:
+                  raise SystemExit('book session anchor not found')
+              text = text.replace(session_anchor, session_replacement, 1)
+
+          path.write_text(text)
+          PY
+      - name: Verify exact source scope
+        if: steps.gate.outputs.apply == 'true'
+        run: |
+          git diff --check
+          test "$(git diff --name-only | sort | tr '\n' ' ')" = "src/services/books.js "
+      - name: Install and verify root application
+        if: steps.gate.outputs.apply == 'true'
+        run: |
+          npm ci --ignore-scripts
+          npm run check
+          npm audit --omit=dev --audit-level=high
+      - name: Install and verify Workspace Agent
+        if: steps.gate.outputs.apply == 'true'
+        working-directory: automation/workspace-agent
+        run: |
+          npm ci --ignore-scripts
+          npm run check
+          npm audit --omit=dev --audit-level=high
+      - name: Commit verified source change
+        if: steps.gate.outputs.apply == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/services/books.js
+          git rm .github/book-verification-bounds-trigger
+          git diff --cached --check
+          git commit -m 'fix: bound persisted book verification metadata [book-bounds-fix]'
+          git push origin HEAD:audit/comprehensive-hardening
