@@ -493,9 +493,9 @@ cutover_files() {
 start_application_as_runtime_user() {
   local start_rc=0
   if (( TEST_MODE == 1 )); then
-    runuser -u "$RUNTIME_USER" -- bash "$AAPANEL_START_SCRIPT" || start_rc=$?
+    runuser -u "$RUNTIME_USER" -- bash "$AAPANEL_START_SCRIPT" 9>&- || start_rc=$?
   else
-    runuser -u "$RUNTIME_USER" -- env "PATH=$RUNTIME_NODE_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" bash "$AAPANEL_START_SCRIPT" || start_rc=$?
+    runuser -u "$RUNTIME_USER" -- env "PATH=$RUNTIME_NODE_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" bash "$AAPANEL_START_SCRIPT" 9>&- || start_rc=$?
   fi
   if ! wait_for_listener; then
     if (( start_rc != 0 )); then return "$start_rc"; fi
