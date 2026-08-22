@@ -31,13 +31,26 @@ Never deploy from `main`, `latest`, a feature branch, a working directory, or an
 
 The permanent engine is repository-owned at `scripts/deploy-release.sh` and installed as `/usr/local/sbin/deploy-knowledge-pilot` by `scripts/install-deployer.sh`.
 
-After the engine change is merged to `main`, install it from that exact merged commit:
+After the engine change is merged to `main`, use the exact merged commit as `<ENGINE_SOURCE_SHA>`. The current live release does not contain this new installer yet, so bootstrap it directly from the existing read-only deployment checkout rather than from `/www/wwwroot/knowledgepilot`:
 
 ```bash
-sudo bash scripts/install-deployer.sh <ENGINE_SOURCE_SHA>
+ENGINE_SOURCE_SHA='<ENGINE_SOURCE_SHA>'
+sudo bash -c '
+set -Eeuo pipefail
+repo=/opt/knowledgepilot-deploy
+sha="$1"
+git -C "$repo" fetch --prune origin
+test "$(git -C "$repo" cat-file -t "$sha" 2>/dev/null)" = commit
+git -C "$repo" merge-base --is-ancestor "$sha" refs/remotes/origin/main
+tmp="$(mktemp)"
+trap '\''rm -f "$tmp"'\'' EXIT
+git -C "$repo" show "${sha}:scripts/install-deployer.sh" > "$tmp"
+bash -n "$tmp"
+bash "$tmp" "$sha"
+' knowledge-pilot-bootstrap "$ENGINE_SOURCE_SHA"
 ```
 
-The installer fetches through the existing repository-specific read-only GitHub access, extracts the engine from the exact source commit, syntax-checks/self-tests it, installs it atomically as root-owned mode `0755`, and verifies the installed hash and self-test.
+The bootstrap does not update the deployment checkout working tree and uses only the existing repository-specific read-only GitHub access. The installer independently re-verifies the source commit, extracts the engine from that exact commit, syntax-checks/self-tests it, installs it atomically as root-owned mode `0755`, and verifies the installed hash and self-test.
 
 Application releases do not update the running deployment engine midway through deployment. A deliberate one-time reinstall is required only when the deployment architecture or the engine itself materially changes. See `docs/AAPANEL_DEPLOYMENT.md` for that boundary and rollback semantics.
 
