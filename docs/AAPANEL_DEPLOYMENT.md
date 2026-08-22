@@ -48,11 +48,26 @@ The repository owns both pieces:
 - deployment engine: `scripts/deploy-release.sh`
 - one-time installer: `scripts/install-deployer.sh`
 
-After the deployment-engine change is merged to `main`, use the exact merged source commit as `<ENGINE_SOURCE_SHA>` and run the source-controlled installer once on production:
+After the deployment-engine change is merged to `main`, use the exact merged source commit as `<ENGINE_SOURCE_SHA>`. Because the live application is still an older release during this first bootstrap, do **not** assume `scripts/install-deployer.sh` already exists in `/www/wwwroot/knowledgepilot`. Bootstrap the reviewed installer directly from the exact commit in the existing read-only deployment checkout:
 
 ```bash
-sudo bash scripts/install-deployer.sh <ENGINE_SOURCE_SHA>
+ENGINE_SOURCE_SHA='<ENGINE_SOURCE_SHA>'
+sudo bash -c '
+set -Eeuo pipefail
+repo=/opt/knowledgepilot-deploy
+sha="$1"
+git -C "$repo" fetch --prune origin
+test "$(git -C "$repo" cat-file -t "$sha" 2>/dev/null)" = commit
+git -C "$repo" merge-base --is-ancestor "$sha" refs/remotes/origin/main
+tmp="$(mktemp)"
+trap '\''rm -f "$tmp"'\'' EXIT
+git -C "$repo" show "${sha}:scripts/install-deployer.sh" > "$tmp"
+bash -n "$tmp"
+bash "$tmp" "$sha"
+' knowledge-pilot-bootstrap "$ENGINE_SOURCE_SHA"
 ```
+
+This bootstrap does not update the deployment checkout working tree and does not need a GitHub write credential. The installer then independently re-verifies the exact source commit before installation.
 
 The installer:
 
@@ -79,7 +94,7 @@ If no matching npm-config entry is found, the installer makes no npm-config chan
 
 ### 1. Exclusive lock and production preflight
 
-Before changing live production, the engine acquires an exclusive `flock`. A concurrent invocation fails immediately.
+Before changing live production, the engine acquires an exclusive `flock`. A concurrent invocation fails immediately without running stage cleanup owned by the active deployment.
 
 It then verifies the actual running application rather than inferring identity from file ownership or a successful manager command:
 
@@ -283,7 +298,7 @@ Automated tests permanently cover these failures:
 5. **Node STDIN module mode:** top-level-await snippets explicitly use ESM.
 6. **command success is not runtime success:** PID, cwd, argv, listener, runtime identity, version, and health are checked after startup.
 
-The test suite also includes disposable success and forced-failure simulations for clean cutover, runtime-owned data preservation, stale-file removal, automatic rollback, and the one-time installer.
+The test suite also includes disposable success and forced-failure simulations for clean cutover, runtime-owned data preservation, stale-file removal, automatic rollback, deployment-lock isolation, and the one-time installer.
 
 ## When the permanent engine must be deliberately upgraded
 
