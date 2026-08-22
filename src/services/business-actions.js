@@ -50,7 +50,7 @@ function addBilingualContract(context) {
   return {
     ...context,
     readingDocumentContract: READING_DOCUMENT_CONTRACT,
-    taskInstructions: `Produce the complete ReadingDocument in English and Arabic atomically from the same researched evidence. Preserve identical logical section/block ids, meaning, claims, examples, checks, and source basis across both languages. Do not translate by inventing or omitting facts. The learner language controls the default opening/channel language only. ${context.taskInstructions}`,
+    taskInstructions: `Produce the complete ReadingDocument in English and Arabic atomically from the same researched evidence. Preserve identical logical section/block ids, meaning, claims, examples, checks, and source basis across both languages. Do not translate by inventing or omitting facts. Keep the established flat lesson/session content in the learner's configured language for concise Telegram/WhatsApp delivery and backward compatibility; the ReadingDocument is the bilingual web-reading payload. The learner language controls the default opening/channel language only. ${context.taskInstructions}`,
     resultContract: {
       ...context.resultContract,
       readingDocument: readingDocumentResultContract()
