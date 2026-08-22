@@ -74,13 +74,14 @@ for (const type of ['lesson', 'book_session']) {
     await service.claim('task_1');
     await assert.rejects(
       service.submit('task_1', { verification: { finalAudit: {} }, sources: [] }),
-      (error) => error.code === 'INVALID_READING_DOCUMENT'
+      (error) => error.code === 'RESULT_CONTRACT_INVALID' && error.statusCode === 422 && error.retryable === true
     );
     assert.equal(state.businessTasks.task_1.status, 'pending');
     assert.equal(state.businessTasks.task_1.claimedAt, null);
     assert.equal(state.businessTasks.task_1.submissionRejectCount, 1);
-    assert.equal(state.businessTasks.task_1.lastSubmissionError?.code, 'INVALID_READING_DOCUMENT');
+    assert.equal(state.businessTasks.task_1.lastSubmissionError?.code, 'RESULT_CONTRACT_INVALID');
     assert.equal(state.businessTasks.task_1.lastSubmissionError?.retryable, true);
+    assert.equal(state.businessTasks.task_1.lastSubmissionError?.diagnostics?.contract, 'reading-document.v1');
   });
 }
 
