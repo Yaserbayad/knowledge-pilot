@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeLesson } from '../src/services/learning.js';
+import { normalizeBookSession } from '../src/services/books.js';
+import { normalizeReadingDocument } from '../src/services/reading-document.js';
 
 const bilingualReadingDocument = {
   version: 1,
@@ -45,6 +47,47 @@ test('normalizeLesson retains a complete English/Arabic ReadingDocument v1', () 
     sources: [],
     claims: []
   }, proposal, [], user);
+
+  assert.deepEqual(normalized.readingDocument, bilingualReadingDocument);
+});
+
+test('ReadingDocument rejects one-sided locale content and unsupported block types', () => {
+  const missingArabic = structuredClone(bilingualReadingDocument);
+  missingArabic.sections[0].blocks[0].text.ar = '';
+  assert.throws(
+    () => normalizeReadingDocument(missingArabic, { required: true }),
+    (error) => error.code === 'INVALID_READING_DOCUMENT' && /English and Arabic/.test(error.message)
+  );
+
+  const unsupported = structuredClone(bilingualReadingDocument);
+  unsupported.sections[0].blocks[0].type = 'arbitrary_html';
+  assert.throws(
+    () => normalizeReadingDocument(unsupported, { required: true }),
+    (error) => error.code === 'INVALID_READING_DOCUMENT' && /Unsupported reading block type/.test(error.message)
+  );
+});
+
+test('ReadingDocument rejects duplicate stable ids across its render tree', () => {
+  const duplicate = structuredClone(bilingualReadingDocument);
+  duplicate.glossary[0].id = 'opening-idea';
+  assert.throws(
+    () => normalizeReadingDocument(duplicate, { required: true }),
+    (error) => error.code === 'INVALID_READING_DOCUMENT' && /Duplicate stable reading id/.test(error.message)
+  );
+});
+
+test('normalizeBookSession retains the same validated bilingual ReadingDocument v1 contract', () => {
+  const book = { title: 'Thinking in Systems', language: 'en', ownedCopy: null };
+  const planItem = { title: 'Feedback loops', number: 1, scope: 'Feedback loops', chapterRefs: [], pageRefs: [], estimatedMinutes: 8 };
+  const user = { language: 'en' };
+  const normalized = normalizeBookSession({
+    title: 'Feedback loops',
+    readingDocument: bilingualReadingDocument,
+    content: {},
+    quiz: [],
+    sources: [],
+    claims: []
+  }, book, planItem, user, []);
 
   assert.deepEqual(normalized.readingDocument, bilingualReadingDocument);
 });
