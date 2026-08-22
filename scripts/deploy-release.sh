@@ -247,6 +247,10 @@ verify_start_script_runtime_writes() {
     target="${target%\"}"; target="${target#\"}"
     target="${target%\'}"; target="${target#\'}"
     [[ "$target" == /* ]] || continue
+    # aaPanel's generated script commonly writes its PID file itself. The
+    # runtime user does not need permission for that final bookkeeping write:
+    # the deployer rewrites the PID file as root only after the listener,
+    # cwd, argv and runtime identity have been independently verified.
     [[ "$target" == "$AAPANEL_PID_FILE" ]] && continue
     if [[ -e "$target" ]]; then
       runuser -u "$RUNTIME_USER" -- test -w "$target" || return 1
@@ -420,6 +424,8 @@ capture_workspace_timer_state() {
 pause_workspace_timer_if_active() {
   (( TEST_MODE == 1 )) && return 0
   if [[ "$TIMER_WAS_ACTIVE" == "active" ]]; then
+    # Mark restoration responsibility before invoking stop: systemctl may
+    # complete the side effect even if its client command later reports an error.
     AUTOMATION_PAUSED=1
     systemctl stop "$WORKSPACE_TIMER" || return 1
     if systemctl is-active --quiet "$WORKSPACE_TIMER"; then return 1; fi
@@ -736,6 +742,9 @@ main() {
 
   phase LIVE_STOP
   verify_current_runtime || fail "runtime changed before stop"
+  # Sending TERM is already a material production availability mutation. From
+  # this point onward every failure is rollback-eligible, even if shutdown
+  # confirmation itself times out.
   CUTOVER_STARTED=1
   graceful_stop_application "$CURRENT_PID" || fail "graceful live stop failed"
 
