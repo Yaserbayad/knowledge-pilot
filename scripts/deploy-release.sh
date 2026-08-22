@@ -263,7 +263,7 @@ preflight() {
 }
 
 resolve_release() {
-  git -C "$DEPLOY_REPO" fetch --prune --tags origin >/dev/null || return 1
+  git -C "$DEPLOY_REPO" fetch --prune --prune-tags --tags origin >/dev/null || return 1
   verify_deploy_key_sidecar_if_available || return 1
   local actual_sha
   actual_sha="$(git -C "$DEPLOY_REPO" rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}" 2>/dev/null)" || return 1
@@ -573,9 +573,9 @@ on_exit() {
 }
 
 self_test() {
-  validate_release_args v1.4.3 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa || return 1
+  validate_release_args v0.0.0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa || return 1
   ! validate_release_args main aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa || return 1
-  ! validate_release_args v1.4.3 deadbeef || return 1
+  ! validate_release_args v0.0.0 deadbeef || return 1
   is_safe_env_mode 600 || return 1
   ! is_safe_env_mode 644 || return 1
   [[ "$(canonical_public_key 'ssh-ed25519 AAAATEST comment')" == "ssh-ed25519 AAAATEST" ]] || return 1
