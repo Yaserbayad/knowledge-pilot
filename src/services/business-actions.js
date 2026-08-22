@@ -50,7 +50,6 @@ function taskUsesReadingDocument(task) {
 }
 
 function addBilingualContract(context) {
-  if (!taskUsesReadingDocument(context?.task)) return context;
   return {
     ...context,
     readingDocumentContract: READING_DOCUMENT_CONTRACT,
@@ -71,7 +70,9 @@ export class BusinessActionsService extends CoreBusinessActionsService {
   }
 
   getTask(taskId) {
-    return addBilingualContract(super.getTask(taskId));
+    const context = super.getTask(taskId);
+    const task = this.store.read((state) => state.businessTasks?.[taskId]);
+    return taskUsesReadingDocument(task) ? addBilingualContract(context) : context;
   }
 
   async submit(taskId, result) {
