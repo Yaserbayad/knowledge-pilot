@@ -2,7 +2,7 @@ import { BusinessActionsService as CoreBusinessActionsService } from './business
 import { READING_BLOCK_TYPES, normalizeReadingDocument } from './reading-document.js';
 
 const BILINGUAL_TASK_TYPES = new Set(['lesson', 'book_session', 'book_finale']);
-const RETRYABLE_INTEGRATION_PATTERN = /readingdocument|contract|schema|parsing|integration|server[- ]side result|result[- ]contract/i;
+const RETRYABLE_INTEGRATION_PATTERN = /readingdocument|result[- ]contract|submission[- ]schema|schema(?: mismatch| validation| error)?|parsing|integration|server[- ]side result/i;
 
 const READING_DOCUMENT_CONTRACT = Object.freeze({
   version: 1,
@@ -86,6 +86,20 @@ function addBilingualContract(context) {
   };
 }
 
+function submissionContractError(cause) {
+  const message = String(cause?.message || 'ReadingDocument v1 failed result-contract validation').trim().slice(0, 2000);
+  const error = new Error(message);
+  error.code = 'RESULT_CONTRACT_INVALID';
+  error.statusCode = 422;
+  error.retryable = true;
+  error.details = [message];
+  error.diagnostics = {
+    contract: 'reading-document.v1',
+    originalCode: String(cause?.code || 'INVALID_READING_DOCUMENT').slice(0, 120)
+  };
+  return error;
+}
+
 export class BusinessActionsService extends CoreBusinessActionsService {
   async queue(type, userId, payload = {}, options = {}) {
     const versionedPayload = this.config.readingDocumentContract === 'v1' && BILINGUAL_TASK_TYPES.has(type)
@@ -136,7 +150,8 @@ export class BusinessActionsService extends CoreBusinessActionsService {
       try {
         const readingDocument = normalizeReadingDocument(result?.readingDocument, { required: true });
         result = { ...result, readingDocument };
-      } catch (error) {
+      } catch (cause) {
+        const error = submissionContractError(cause);
         await this.#recordRetryableContractError(taskId, error);
         throw error;
       }
