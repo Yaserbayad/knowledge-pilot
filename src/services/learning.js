@@ -3,6 +3,7 @@ import { evaluateLesson } from './quality.js';
 import { mockPlan, mockLesson } from './ai.js';
 import { clamp, nowIso, randomCode, uid, weekStartIso } from '../utils.js';
 import { queueSystemNotice } from './notices.js';
+import { normalizeReadingDocument } from './reading-document.js';
 
 export const SYSTEM_STANDARD = `You are the research and instructional engine for an adaptive personal knowledge system.
 The learner wants deep understanding, long-term retention, stronger critical thinking, and practical usefulness while replacing most traditional reading.
@@ -135,6 +136,7 @@ export function normalizeLesson(raw, proposal, sources, user) {
     language: boundedText(raw.language || user.language || 'en', 20),
     estimatedMinutes: clamp(Number(raw.estimatedMinutes) || proposal.estimatedMinutes || 8, 4, 15),
     difficulty: ['easy', 'moderate', 'demanding'].includes(raw.difficulty) ? raw.difficulty : 'moderate',
+    readingDocument: raw.readingDocument ? normalizeReadingDocument(raw.readingDocument, { required: true }) : null,
     content: {
       hook: boundedText(content.hook, 2000),
       coreExplanation: boundedText(content.coreExplanation, 12000),
