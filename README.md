@@ -86,7 +86,15 @@ Everything after a valid result submission—quality gating, scheduling, deliver
 
 ## Installation and deployment
 
-For production aaPanel deployment, use [START-HERE.md](START-HERE.md) and the canonical [immutable-release runbook](docs/AAPANEL_DEPLOYMENT.md). Production releases are staged and verified from an immutable release tag/SHA; do not deploy a moving branch or reuse an old `automation/` or `node_modules/` directory.
+For production aaPanel deployment, use [START-HERE.md](START-HERE.md) and the canonical [immutable-release runbook](docs/AAPANEL_DEPLOYMENT.md). Production releases are staged and verified from an immutable semantic release tag plus its exact commit SHA; do not deploy a moving branch or reuse old release-owned source.
+
+After the one-time deployer bootstrap, an ordinary production release is invoked with the same permanent command every time:
+
+```bash
+sudo deploy-knowledge-pilot vX.Y.Z <EXPECTED_40_CHARACTER_COMMIT_SHA>
+```
+
+The repository-owned engine is `scripts/deploy-release.sh`; `scripts/install-deployer.sh` installs it once as `/usr/local/sbin/deploy-knowledge-pilot` from an exact merged source commit. The installed engine is deliberately upgraded separately when deployment architecture changes; it does not replace itself while an application deployment is running.
 
 For a brand-new configuration before first production start:
 
@@ -100,7 +108,7 @@ node scripts/verify-config.js
 npm run check
 ```
 
-The repository-owned `scripts/install-aapanel.sh` is a fail-closed **release preparation** command for an existing configured staging tree. It performs a locked production install and verification but never starts or changes a process manager.
+The repository-owned `scripts/install-aapanel.sh` is a fail-closed **staged-release preparation** command for an existing configured staging tree. It performs a locked full dependency install, configuration verification, the complete current application check/test suite, the high-severity production dependency audit, and then a production-only locked install. It never starts or changes a process manager.
 
 Use one process manager only. The supported application entry point is:
 

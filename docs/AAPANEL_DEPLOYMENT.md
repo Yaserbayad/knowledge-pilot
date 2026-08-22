@@ -1,231 +1,338 @@
 # aaPanel deployment — canonical immutable-release runbook
 
-This is the authoritative deployment and rollback procedure for Knowledge Pilot on the current aaPanel host.
+This is the authoritative production deployment and rollback procedure for the current Knowledge Pilot aaPanel host.
 
-## Deployment invariants
+The normal steady state is deliberately manual at the release gate and automated after that gate:
 
-- Deploy an **immutable release tag resolved to an exact commit SHA**. Never deploy `main`, `latest`, or another moving branch.
-- Live application path: `/www/wwwroot/knowledgepilot`.
-- Bind the Node application to `127.0.0.1:3100`; expose it only through the existing HTTPS reverse proxy.
-- Preserve only runtime-owned material: `.env`, `data/`, and server-owned `.well-known/` when present.
-- Do **not** preserve `automation/`, application source, `node_modules/`, `.git/`, or other release files. They belong to the release being deployed or to the deployment checkout outside the web root.
-- Run exactly one Knowledge Pilot application instance. Reuse the process manager that already owns the live process; do not introduce PM2, systemd, or another manager during a code cutover.
-- The server deployment credential must be repository-specific and read-only. A write-capable GitHub CLI/token credential is not part of the steady-state deployment design.
-- Never print `.env`, deployment keys, bearer tokens, or other secrets into logs or terminal output.
-
-The examples below use `<RELEASE_TAG>` and `<RELEASE_SHA>` deliberately. Replace them only with the release identity published in GitHub after final verification.
-
-## 1. Identify the real live process before changing anything
-
-Do not infer process ownership from the current shell user's PM2 registry. Inspect the listener and process directly:
-
-```bash
-ps -eo user,pid,ppid,lstart,cmd | grep -E 'node|knowledgepilot' | grep -v grep
-sudo ss -ltnp | grep -E 'node|:3100'
+```text
+develop -> verify/review -> merge -> immutable semantic tag -> SSH -> one deploy command -> PASS or verified rollback
 ```
 
-For each candidate PID:
+There is no GitHub release watcher, deployment timer, GitHub-triggered SSH job, self-hosted runner, or new AI execution service.
+
+## Production contract
+
+The permanent deployment engine is designed for this deployment architecture:
+
+- Repository: `Yaserbayad/knowledge-pilot`.
+- Live path: `/www/wwwroot/knowledgepilot`.
+- Listener: `127.0.0.1:3100`.
+- Application entry: `node src/index.js`.
+- Runtime user/group: `www:www`.
+- Application process manager: the existing aaPanel Node project only.
+- Deployment checkout: `/opt/knowledgepilot-deploy`.
+- Production GitHub authentication: the existing repository-specific **read-only** SSH deploy key.
+- Permanent command: `/usr/local/sbin/deploy-knowledge-pilot`.
+- Runtime-owned paths preserved across every deployment: `.env`, `data/`, and `.well-known/` when present.
+
+Release-owned source, `automation/`, `node_modules/`, `.git/`, and obsolete release files are replaced by the requested release. They are never copied forward from the current live source tree.
+
+The deployment engine must never print `.env` contents, application secrets, bearer tokens, Telegram credentials, SSH private keys, learner data, or owned book contents.
+
+## Release authority and invocation
+
+GitHub is the sole code authority. Deploy only an immutable semantic release tag plus its exact 40-character commit SHA:
 
 ```bash
-sudo readlink -f /proc/PID/cwd
-sudo tr '\0' ' ' < /proc/PID/cmdline; echo
-sudo cat /proc/PID/cgroup
+sudo deploy-knowledge-pilot v1.4.3 <EXPECTED_40_CHARACTER_COMMIT_SHA>
 ```
 
-The expected application process has working directory `/www/wwwroot/knowledgepilot` and runs `node src/index.js` (directly or through the existing manager). Record the exact existing stop and start/restart mechanism. If process ownership is ambiguous, stop here; do not start another copy.
+The two-argument interface is intentional. A tag is human-readable release identity; the expected SHA is an independent fail-closed identity check. The engine fetches tags through the read-only deployment checkout, resolves `refs/tags/<tag>^{commit}`, and requires the result to equal the supplied SHA exactly. It refuses branches such as `main`, aliases such as `latest`, malformed tags, unavailable commits, and tag/SHA mismatches.
 
-## 2. Resolve and verify the immutable release
+Do not weaken this to a moving ref merely to shorten the command.
 
-Use a private deployment checkout outside the live web root, authenticated with the repository-specific read-only credential:
+## One-time installation of the permanent command
+
+The repository owns both pieces:
+
+- deployment engine: `scripts/deploy-release.sh`
+- one-time installer: `scripts/install-deployer.sh`
+
+After the deployment-engine change is merged to `main`, use the exact merged source commit as `<ENGINE_SOURCE_SHA>`. Because the live application is still an older release during this first bootstrap, do **not** assume `scripts/install-deployer.sh` already exists in `/www/wwwroot/knowledgepilot`. Bootstrap the reviewed installer directly from the exact commit in the existing read-only deployment checkout:
 
 ```bash
-DEPLOY_REPO=/opt/knowledgepilot-deploy
-LIVE=/www/wwwroot/knowledgepilot
-STAGE=/www/wwwroot/knowledgepilot.stage
-ROLLBACK=/www/wwwroot/knowledgepilot.rollback
-RELEASE_TAG='<RELEASE_TAG>'
-EXPECTED_SHA='<RELEASE_SHA>'
-
-cd "$DEPLOY_REPO"
-git fetch --prune --tags origin
-ACTUAL_SHA="$(git rev-parse "${RELEASE_TAG}^{commit}")"
-test "$ACTUAL_SHA" = "$EXPECTED_SHA"
+ENGINE_SOURCE_SHA='<ENGINE_SOURCE_SHA>'
+sudo bash -c '
+set -Eeuo pipefail
+repo=/opt/knowledgepilot-deploy
+sha="$1"
+git -C "$repo" fetch --prune origin
+test "$(git -C "$repo" cat-file -t "$sha" 2>/dev/null)" = commit
+git -C "$repo" merge-base --is-ancestor "$sha" refs/remotes/origin/main
+tmp="$(mktemp)"
+trap '\''rm -f "$tmp"'\'' EXIT
+git -C "$repo" show "${sha}:scripts/install-deployer.sh" > "$tmp"
+bash -n "$tmp"
+bash "$tmp" "$sha"
+' knowledge-pilot-bootstrap "$ENGINE_SOURCE_SHA"
 ```
 
-Fail closed if the tag does not resolve exactly to the published SHA.
+This bootstrap does not update the deployment checkout working tree and does not need a GitHub write credential. The installer then independently re-verifies the exact source commit before installation.
 
-## 3. Build a clean staging tree from that commit
+The installer:
 
-The staging tree is built from the immutable commit, not copied from the live application:
+1. requires root and an exact 40-character source commit;
+2. verifies `/opt/knowledgepilot-deploy` is the Knowledge Pilot SSH repository;
+3. fetches through the existing deployment credential;
+4. requires the source commit to exist on `origin/main`;
+5. extracts `scripts/deploy-release.sh` directly from that exact commit with `git show`;
+6. runs `bash -n` and the engine's self-test before installation;
+7. atomically installs `/usr/local/sbin/deploy-knowledge-pilot` as `root:root` mode `0755`;
+8. verifies the installed file hash, permissions, and self-test.
 
-```bash
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
-git archive "$EXPECTED_SHA" | tar -x -C "$STAGE"
+The installed engine does **not** overwrite itself during application deployments. This avoids a circular deployment where the currently executing safety mechanism changes midway through its own run.
 
-# Copy configuration without displaying it. Validation uses isolated staging data.
-install -m 600 "$LIVE/.env" "$STAGE/.env"
-mkdir -p "$STAGE/data/backups" "$STAGE/data/cards" "$STAGE/data/book-files" "$STAGE/data/whatsapp-auth"
+### Bounded npm configuration cleanup during installation
+
+The one-time installer also checks npm's user/global configuration file locations plus `/root/.npmrc` and `/etc/npmrc`. If it finds stale npm-config entries named `APP_SECRET`, `--init.module`, or `init.module`, it removes only those configuration entries while preserving the file's ownership and mode. It reports only the configuration path and key name, never the value.
+
+This cleanup does **not** read, print, replace, or modify `/www/wwwroot/knowledgepilot/.env`, and therefore does not alter the actual Knowledge Pilot `APP_SECRET`.
+
+If no matching npm-config entry is found, the installer makes no npm-config change. The actual production source of the prior npm warnings is confirmed only by the path/key evidence printed when the installer runs; do not guess it in advance.
+
+## What one deployment command performs
+
+### 1. Exclusive lock and production preflight
+
+Before changing live production, the engine acquires an exclusive `flock`. A concurrent invocation fails immediately without running stage cleanup owned by the active deployment.
+
+It then verifies the actual running application rather than inferring identity from file ownership or a successful manager command:
+
+- live path, `.env`, and `data/` exist;
+- `.env` mode is exactly `600`, using permission-string comparison rather than decimal arithmetic on octal notation;
+- runtime user `www` can read `.env` and read/write `data/`;
+- exactly one listener owns `127.0.0.1:3100`;
+- the listener PID exists under `/proc`;
+- `/proc/<pid>/cwd` is exactly `/www/wwwroot/knowledgepilot`;
+- argv identifies `node src/index.js`;
+- actual process UID/GID match `www:www`;
+- exactly one aaPanel Node-project PID file identifies that PID and the matching generated aaPanel start script targets the Knowledge Pilot live path;
+- aaPanel start-script output targets needed before process launch are writable by `www`;
+- sufficient disk space exists for staging, rollback, and deployment overhead;
+- the deployment checkout is the expected repository.
+
+The aaPanel PID file itself is a special case: aaPanel's generated start script may attempt to write it even though the application must start as `www`. The engine therefore does not require `www` to own that bookkeeping file. After startup, the privileged deployer writes the **independently verified listener PID** back to the aaPanel PID file.
+
+### 2. Immutable release verification
+
+The engine fetches tags with the existing repository-specific deployment credential and verifies:
+
+```text
+requested semantic tag -> exact commit SHA == supplied expected SHA
 ```
 
-Validate the root application with the locked dependency graph and isolated data directories:
+If the deployment checkout exposes a configured SSH private key and matching `.pub` sidecar, public-key identity is compared canonically as `key-type + key-material`; optional comments are ignored.
 
-```bash
-DATA_DIR=./data WHATSAPP_AUTH_DIR=./data/whatsapp-auth \
-  bash "$STAGE/scripts/install-aapanel.sh" "$STAGE"
+No `gh auth login`, write token, GitHub API write credential, or GitHub Action SSH access is required.
 
-cd "$STAGE"
+### 3. Clean staging from Git
+
+The stage is rebuilt from the exact release commit outside the running tree:
+
+```text
+/www/wwwroot/knowledgepilot.stage
+```
+
+Source comes from `git archive <exact-sha>`, never from the current live application directory. The engine verifies release version identity and deployment-engine compatibility, then privately copies `.env` to staging and creates isolated staging data directories.
+
+### 4. Full verification before live cutover
+
+The staged root application performs, in order:
+
+```text
+locked full dependency install
+configuration verification
+complete current application check/test suite
 npm audit --omit=dev --audit-level=high
+production-only locked dependency preparation
 ```
 
-Validate the Workspace Agent independently, then leave only production dependencies in the staged release:
+`npm run check` determines success by exit status. Test totals are never hardcoded.
 
-```bash
-cd "$STAGE/automation/workspace-agent"
+When `automation/workspace-agent/` is present, staging separately performs:
+
+```text
 npm ci --ignore-scripts
-npm run check
+complete Workspace Agent check/test suite
 npm audit --omit=dev --audit-level=high
 npm ci --omit=dev --ignore-scripts
 ```
 
-Do not continue if any install, configuration check, test, or audit fails.
+Any failure here exits non-zero **before the live application is stopped or release-owned files are replaced**.
 
-## 4. Create a rollback code snapshot
+### 5. Verified rollback snapshot
 
-The rollback snapshot intentionally excludes live secrets, mutable application data, server-owned ACME material, and any repository metadata that should not live in the web root:
+Before cutover the engine creates:
 
-```bash
-rm -rf "$ROLLBACK"
-mkdir -p "$ROLLBACK"
-rsync -a \
-  --exclude='.env' \
-  --exclude='data/' \
-  --exclude='.well-known/' \
-  --exclude='.git/' \
-  "$LIVE/" "$ROLLBACK/"
+```text
+/www/wwwroot/knowledgepilot.rollback
 ```
 
-Confirm that `$ROLLBACK/src/index.js` exists before proceeding.
+The snapshot contains the current release-owned production files and excludes:
 
-## 5. Cut over only after the stage is fully green
+- `.env`
+- `data/`
+- `.well-known/`
+- `.git/`
 
-1. Stop **only** the confirmed Knowledge Pilot process using the exact manager identified in step 1.
-2. Confirm port `3100` is no longer owned by the old Knowledge Pilot PID.
-3. Replace release-owned files while preserving runtime-owned data/configuration and server-owned ACME material:
+The engine requires a valid prior `src/index.js` and semantic `VERSION` before the snapshot is considered rollback-ready.
 
-```bash
-rsync -a --delete \
-  --exclude='.env' \
-  --exclude='data/' \
-  --exclude='.well-known/' \
-  "$STAGE/" "$LIVE/"
+Release copying uses checksum-based `rsync` plus `--delete`. The checksum requirement is deliberate: a disposable regression simulation proved that timestamp/size-only comparison can incorrectly keep an old same-size release file.
+
+### 6. Workspace automation state
+
+If `knowledgepilot-agent-trigger.timer` is already active, the engine records its enabled/active state and pauses it for the short live cutover. If it is not active, it is not started.
+
+After success or rollback, the engine restores only the prior state. A deployment never enables the API-trigger timer merely because a new release was installed.
+
+No ChatGPT schedules, GPTs, plugins/apps, or agents are modified by the deployment engine.
+
+### 7. Graceful aaPanel cutover
+
+Immediately before stopping the application, the engine re-verifies the listener PID, cwd, argv, UID/GID, and aaPanel project identity.
+
+It then sends graceful `TERM` to **only that verified PID** and requires port `3100` to clear. It never uses `pkill`, `killall`, or blind `kill -9`.
+
+The stop is deliberately implemented against the exact aaPanel-tracked PID because common aaPanel terminal restart examples use forced process killing, which is outside Knowledge Pilot's deployment safety policy. The aaPanel PID file and generated start script remain the process-manager identity.
+
+The clean staged release is checksum-copied into the live path with `--delete`, excluding exactly `.env`, `data/`, and `.well-known/`. This removes stale release-owned files and old `.git/` metadata.
+
+Ownership is restored to `www:www` for the application/runtime-owned tree without recursively changing server-owned `.well-known/` ownership.
+
+### 8. Restart as the application user, then verify reality
+
+The generated aaPanel start script is invoked explicitly as `www`:
+
+```text
+runuser -u www -- bash <confirmed-aaPanel-start-script>
 ```
 
-Because the stage comes from `git archive`, old live `.git/` metadata is removed by this cutover rather than carried into production.
+A successful command return is **not** accepted as proof of a successful restart. The engine then independently verifies the new listener PID, cwd, argv, UID/GID, live `VERSION`, and local `/health` response. Only after those checks pass does the privileged wrapper refresh aaPanel's PID file with the verified PID.
 
-4. Restore ownership to the actual runtime account without recursively touching `.well-known`. Example only when `www:www` is the confirmed runtime identity:
+This permanently protects the v1.4.2 failure where invoking the aaPanel start script as root produced `root root node src/index.js`.
 
-```bash
-chown www:www "$LIVE"
-find "$LIVE" -mindepth 1 -maxdepth 1 ! -name '.well-known' -exec chown -R www:www -- {} +
-chmod 600 "$LIVE/.env"
-find "$LIVE/data" -type d -exec chmod 750 {} \;
-find "$LIVE/data" -type f -exec chmod 640 {} \;
+### 9. Authenticated local production smoke
+
+The engine reads `GPT_ACTION_API_KEY` from the existing `.env` internally and performs a bounded authenticated GET of `/api/gpt/health`. The key is never printed or placed in command-line arguments.
+
+Embedded Node code that uses top-level `await` explicitly runs with:
+
+```text
+node --input-type=module
 ```
 
-5. Restart through the **same** manager that owned the process before cutover. Do not start an additional manager.
+This protects the Node 24 `ERR_AMBIGUOUS_MODULE_SYNTAX` regression.
 
-## 6. Workspace Agent server integration
+### 10. Workspace Agent server integration
 
-If the Workspace Agent bridge is part of this installation, render the checked-in unit templates using the Node binary that actually runs the installer:
+When the deployed release includes `automation/workspace-agent/`, the engine runs the checked-in server configurator and then:
 
-```bash
-cd "$LIVE/automation/workspace-agent"
-node deploy/configure-server.mjs
-sudo systemctl daemon-reload
-sudo nginx -t
-sudo systemctl restart knowledgepilot-mcp.service
+```text
+systemctl daemon-reload
+nginx -t
+systemctl restart knowledgepilot-mcp.service
+verify MCP service active
 ```
 
-`configure-server.mjs` preserves existing bridge credentials and MCP route identity, renders `process.execPath` into the service units, and leaves `knowledgepilot-agent-trigger.timer` disabled. Enable the timer only after the release's end-to-end lesson and book automation smoke tests pass.
+The configurator preserves the existing MCP route identity and bearer credentials. The trigger timer is not newly enabled by deployment.
 
-## 7. Verify the running release
+### 11. External production smoke
 
-Local process and health:
+The engine derives `APP_BASE_URL` internally from `.env` without printing the file, requires HTTPS, and verifies:
+
+- external `/health` succeeds and reports the expected release version;
+- `/gpt-action/openapi.json` succeeds and reports the expected release version.
+
+These checks are bounded and non-destructive. A release that changes critical processing contracts may still require release-specific end-to-end lesson/book verification after the generic deployment succeeds.
+
+## Success output
+
+A successful ordinary deployment ends with a concise non-secret result such as:
+
+```text
+RESULT=PASS
+RELEASE=v1.4.3
+RELEASE_SHA=<sha>
+MANAGER=aapanel-node
+RUNTIME_USER=www
+PRODUCTION_CUTOVER=PASS
+```
+
+## Failure and automatic rollback
+
+### Failure before live stop/cutover
+
+A preflight, release-verification, staging, test, audit, or rollback-snapshot failure exits non-zero. The live application source is not replaced and the confirmed live Knowledge Pilot process is not stopped.
+
+### Failure after live cutover begins
+
+The engine automatically attempts rollback using the verified snapshot:
+
+1. stop only a verified failed/new Knowledge Pilot process if one exists;
+2. checksum-restore the prior release-owned files with `--delete`;
+3. preserve the current `.env`, `data/`, and `.well-known/`;
+4. restore production ownership/permissions;
+5. restart through the same aaPanel start script as `www`;
+6. re-verify listener, cwd, argv, UID/GID, prior version, and local health;
+7. rerun the authenticated local smoke;
+8. restore the prior Workspace Agent server integration when present;
+9. rerun external health/OpenAPI checks for the prior version;
+10. restore the prior timer state.
+
+Only then may it print:
+
+```text
+ROLLBACK=PASS
+```
+
+If any rollback verification is ambiguous or fails, the engine reports `ROLLBACK=FAIL` and exits non-zero. It never labels an unverified rollback successful.
+
+## Regression-protected v1.4.2 deployment lessons
+
+Automated tests permanently cover these failures:
+
+1. **npm version:** no npm 11.x pin; runtime support follows repository policy (`Node >=22`, with current production Node 24.18.0/npm 12.0.1 valid).
+2. **permission mode:** `.env` mode is checked as a permission string; unsafe representative modes are rejected.
+3. **root runtime:** aaPanel startup is explicitly invoked as `www`, and actual runtime UID/GID are verified afterward.
+4. **deploy-key comments:** canonical public-key identity ignores optional comments.
+5. **Node STDIN module mode:** top-level-await snippets explicitly use ESM.
+6. **command success is not runtime success:** PID, cwd, argv, listener, runtime identity, version, and health are checked after startup.
+
+The test suite also includes disposable success and forced-failure simulations for clean cutover, runtime-owned data preservation, stale-file removal, automatic rollback, deployment-lock isolation, and the one-time installer.
+
+## When the permanent engine must be deliberately upgraded
+
+Ordinary application releases should continue using the same installed command. UI work, lesson/book workflow changes, normal backend features, validation, styling, new routes, and most GPT-processing changes do not require a new deployment script.
+
+A deliberate engine update is required when the deployment architecture itself changes materially, including examples such as:
+
+- replacing aaPanel as process manager;
+- changing the application runtime user/group;
+- changing live/stage/rollback filesystem layout;
+- materially changing Node/runtime policy;
+- introducing a database schema migration mechanism;
+- adding/removing production services in a way the current engine cannot safely reconcile;
+- changing repository/release identity policy;
+- changing production GitHub authentication architecture.
+
+When that happens, update `scripts/deploy-release.sh` in the repository, test/review/merge it, then rerun the one-time installer with the exact new engine source commit. Do not let an application deployment replace the running engine mid-execution.
+
+## Manual diagnostic checks
+
+If the permanent command stops at preflight, inspect facts without bypassing the guardrails:
 
 ```bash
 sudo ss -ltnp | grep ':3100'
-curl -fsS http://127.0.0.1:3100/health
+PID=<confirmed-pid>
+sudo readlink -f /proc/$PID/cwd
+sudo tr '\0' ' ' < /proc/$PID/cmdline; echo
+sudo awk '/^(Uid|Gid):/' /proc/$PID/status
 ```
 
-External HTTPS health and action schema:
+Do not respond to a preflight failure by starting another Node process or weakening identity checks. Diagnose the exact failed boundary first.
 
-```bash
-curl -fsS https://YOUR_DOMAIN/health
-curl -fsS https://YOUR_DOMAIN/gpt-action/openapi.json
-```
+## Reverse proxy and backups
 
-Confirm the reported application version matches the version encoded by `<RELEASE_TAG>` and that the process serving port `3100` has the expected live working directory.
+The existing HTTPS virtual host should continue proxying to `http://127.0.0.1:3100` and allow owned-book uploads. Port `3100` must remain private.
 
-Then perform the functional smoke set:
-
-1. Open a private learner link and load the learner dashboard.
-2. Open `/admin` and confirm the scheduler is healthy with no unexpected failed jobs.
-3. Exercise a verified-processing lesson task and a book task.
-4. Confirm accepted content schedules once and held content reaches learner review controls.
-5. Confirm Telegram delivery/notification if enabled.
-6. If Workspace Agent automation is configured, run one manual trigger cycle, verify the exact task completes without duplication, then test one timer-triggered cycle before enabling the timer permanently.
-
-Do not call the release deployed until the smoke set passes.
-
-## 8. Rollback
-
-Rollback uses the same process owner and keeps the current `.env`, `data/`, and server-owned `.well-known/` intact:
-
-1. Stop only the confirmed Knowledge Pilot process.
-2. Restore the previous release-owned files:
-
-```bash
-rsync -a --delete \
-  --exclude='.env' \
-  --exclude='data/' \
-  --exclude='.well-known/' \
-  "$ROLLBACK/" "$LIVE/"
-```
-
-3. Restore ownership to release-owned paths using the confirmed runtime account, again excluding `.well-known` from recursive ownership changes.
-4. Restart through the same process manager.
-5. Re-run local and external health checks.
-6. If Workspace Agent unit templates changed between releases, rerun that restored release's `deploy/configure-server.mjs`, `systemctl daemon-reload`, `nginx -t`, and restart its MCP service.
-
-If rollback cannot be verified, keep the service stopped rather than starting an unverified combination of code and runtime state.
-
-## Reverse proxy
-
-The existing HTTPS virtual host should proxy the application to `http://127.0.0.1:3100` and allow owned-book uploads:
-
-```nginx
-proxy_set_header Host $host;
-proxy_set_header X-Real-IP $remote_addr;
-proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-proxy_set_header X-Forwarded-Proto $scheme;
-proxy_http_version 1.1;
-proxy_read_timeout 180s;
-client_max_body_size 35m;
-```
-
-Force HTTPS. Do not expose port `3100` publicly.
-
-## Backups
-
-Built-in backups cover JSON state. Server-level backups should protect the complete `data/` directory, including owned book files. Store at least one encrypted copy off-server when that data matters.
-
-## Common failure conditions
-
-- **Release tag/SHA mismatch:** stop; do not deploy.
-- **Any staged test/audit/config failure:** stop; do not touch the live process.
-- **Ambiguous process manager or multiple port-3100 owners:** stop and reconcile ownership; do not start another process.
-- **HTTP 413:** verify the HTTPS virtual host uses `client_max_body_size 35m`.
-- **Data directory not writable:** restore ownership for the confirmed runtime user.
-- **No Telegram delivery:** verify configuration/binding and whether the item is delivered, scheduled, or held for review.
-- **Workspace Agent suspended/ambiguous run:** leave the timer disabled and reconcile the durable trigger intent before retrying.
+Built-in backups cover JSON state. Server-level backups should protect the complete `data/` directory, including owned book files, with at least one encrypted off-server copy when the data matters.
