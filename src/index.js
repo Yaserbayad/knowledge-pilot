@@ -39,7 +39,14 @@ const learning = new LearningService({ store, ai, research, config, logger });
 const bookFiles = await new BookFileService({ rootDir: config.bookFileDir, logger }).init();
 const books = new BookLearningService({ store, config, logger, bookFiles });
 const accounts = new AccountDeletionService({ store, cardDir: config.cardDir, bookFileDir: config.bookFileDir, logger });
-const businessActions = new BusinessActionsService({ store, research, learning, books, config: { ...config.businessActions, cardDir: config.cardDir }, logger });
+const businessActions = new BusinessActionsService({
+  store,
+  research,
+  learning,
+  books,
+  config: { ...config.businessActions, cardDir: config.cardDir, readingDocumentContract: 'v1' },
+  logger
+});
 learning.setBusinessActions(businessActions);
 books.setBusinessActions(businessActions);
 const telegram = new TelegramChannel({ config: { ...config.telegram, appSecret: config.appSecret, cardDir: config.cardDir }, store, learning, books, logger });
