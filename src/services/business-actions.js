@@ -2,8 +2,8 @@ import { BusinessActionsService as CoreBusinessActionsService } from './business
 import { READING_BLOCK_TYPES, normalizeReadingDocument } from './reading-document.js';
 
 const BILINGUAL_TASK_TYPES = new Set(['lesson', 'book_session', 'book_finale']);
-const RETRYABLE_INTEGRATION_PATTERN = /readingdocument|result[- ]contract|submission[- ]schema|submission endpoint|schema(?: mismatch| validation| error)?|validator|(?:http[ -]?)?422|parsing|integration|server[- ]side result|primary subject/i;
-const WEEKLY_PLAN_TOPIC_RULE = 'For weekly plans, proposal.topic is the validator subject-allocation label: for at least two of the three proposals, set proposal.topic exactly equal to primarySubject using the same wording (comparison is case-insensitive). A secondary proposal topic must exactly match one value from secondarySubjects. Put narrower subtopic specificity in the proposal title, question, and reason instead of replacing the subject-allocation topic.';
+const RETRYABLE_INTEGRATION_PATTERN = /readingdocument|result[- ]contract|submission[- ]schema|schema(?: mismatch| validation| error)?|parsing|integration|server[- ]side result/i;
+const WEEKLY_PLAN_TOPIC_RULE = 'For weekly plans, proposal.topic is the validator subject-allocation label: for at least two of the three proposals, set proposal.topic exactly equal to primarySubject using the same wording (comparison is case-insensitive). Put narrower subtopic specificity in the proposal title, question, and reason instead of replacing the subject-allocation topic.';
 
 const READING_DOCUMENT_CONTRACT = Object.freeze({
   version: 1,
@@ -87,9 +87,9 @@ function recoverableReadingFailure(task) {
 
 function recoverableRetryableFailure(task) {
   return recoverableReadingFailure(task) || (
-    task?.status === 'failed'
+    task?.type !== 'book_analysis'
+    && task?.status === 'failed'
     && task?.lastSubmissionError?.retryable === true
-    && RETRYABLE_INTEGRATION_PATTERN.test(String(task?.error || ''))
   );
 }
 
@@ -126,7 +126,7 @@ function addWeeklyPlanContract(context) {
           ...resultContract,
           proposals: [{
             ...proposalShape,
-            topic: 'string; for at least two proposals exactly equal primarySubject; any secondary proposal exactly matches one secondarySubjects value'
+            topic: 'string; for at least two proposals exactly equal primarySubject'
           }]
         }
       : resultContract
@@ -257,6 +257,9 @@ export class BusinessActionsService extends CoreBusinessActionsService {
   async fail(taskId, reason) {
     const task = this.store.read((state) => state.businessTasks?.[taskId]);
     const message = String(reason || 'Unspecified failure').trim().slice(0, 2000);
+    if (task?.type !== 'book_analysis' && task?.lastSubmissionError?.retryable === true) {
+      return this.#recordRetryableContractError(taskId, task.lastSubmissionError, { reuseExisting: true });
+    }
     if (task?.type !== 'book_analysis' && RETRYABLE_INTEGRATION_PATTERN.test(message)) {
       const error = Object.assign(new Error(`Retryable integration issue reported by the GPT: ${message}`), {
         code: 'CLIENT_REPORTED_CONTRACT_ERROR'
