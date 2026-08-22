@@ -1,6 +1,6 @@
 {
   "name": "knowledge-pilot",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "Self-hosted adaptive personal knowledge and book learning system",
   "private": true,
   "type": "module",
