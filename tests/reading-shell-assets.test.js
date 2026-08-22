@@ -1,8 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const read = (relative) => fs.readFile(new URL(relative, import.meta.url), 'utf8');
+
+test('production reading shell remains valid JavaScript', () => {
+  const file = fileURLToPath(new URL('../public/reading-shell.js', import.meta.url));
+  assert.doesNotThrow(() => execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' }));
+});
 
 test('learner shell loads the frozen reading experience through external strict-CSP assets', async () => {
   const html = await read('../public/app.html');
