@@ -5,6 +5,7 @@ umask 077
 DEPLOY_REPO="/opt/knowledgepilot-deploy"
 TARGET="/usr/local/sbin/deploy-knowledge-pilot"
 LOCK_FILE="/run/lock/knowledgepilot-deployer-install.lock"
+DEPLOY_LOCK_FILE="/run/lock/knowledgepilot-deploy.lock"
 REPOSITORY_SLUG="Yaserbayad/knowledge-pilot"
 INSTALL_TEST_MODE=0
 
@@ -21,6 +22,7 @@ configure_installer_paths() {
     DEPLOY_REPO="$resolved/deploy-repo"
     TARGET="$resolved/usr/local/sbin/deploy-knowledge-pilot"
     LOCK_FILE="$resolved/install.lock"
+    DEPLOY_LOCK_FILE="$resolved/deploy.lock"
     TEST_NPMRC="$resolved/npmrc"
   fi
 }
@@ -107,9 +109,11 @@ main() {
   [[ -d "$DEPLOY_REPO/.git" ]] || { printf 'Deployment repository is missing.\n' >&2; return 1; }
   verify_deploy_repo_origin || { printf 'Deployment repository origin is not the Knowledge Pilot SSH repository.\n' >&2; return 1; }
 
-  mkdir -p "$(dirname "$LOCK_FILE")"
+  mkdir -p "$(dirname "$LOCK_FILE")" "$(dirname "$DEPLOY_LOCK_FILE")"
   exec 9>"$LOCK_FILE"
   flock -n 9 || { printf 'Another deployer installation is active.\n' >&2; return 1; }
+  exec 8>"$DEPLOY_LOCK_FILE"
+  flock -n 8 || { printf 'An application deployment is active; deployer installation refused.\n' >&2; return 1; }
 
   git -C "$DEPLOY_REPO" fetch --prune origin >/dev/null
   [[ "$(git -C "$DEPLOY_REPO" cat-file -t "$source_sha" 2>/dev/null)" == "commit" ]] || { printf 'Engine source commit is unavailable.\n' >&2; return 1; }
