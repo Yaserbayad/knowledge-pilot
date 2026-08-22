@@ -1,0 +1,47 @@
+name: Temporary v1.5.3 version bump
+
+on:
+  push:
+    branches:
+      - fix/weekly-plan-retry-loop
+    paths:
+      - .github/workflows/version-bump-v1.5.3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/weekly-plan-retry-loop
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Prepare exact release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm version 1.5.3 --no-git-tag-version
+          printf '1.5.3\n' > VERSION
+          sed -i "s/knowledge-pilot-shell-v1\.5\.2/knowledge-pilot-shell-v1.5.3/" public/sw.js
+          sed -i "s/APP_VERSION = '1\.5\.2'/APP_VERSION = '1.5.3'/" src/version.js
+          test "$(cat VERSION)" = "1.5.3"
+          node -e "const p=require('./package.json');const l=require('./package-lock.json');if(p.version!=='1.5.3'||l.version!=='1.5.3'||l.packages[''].version!=='1.5.3')process.exit(1)"
+          grep -Fq "knowledge-pilot-shell-v1.5.3" public/sw.js
+          grep -Fq "APP_VERSION = '1.5.3'" src/version.js
+          git diff --check
+      - name: Commit generated release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add VERSION package.json package-lock.json public/sw.js src/version.js
+          git commit -m 'release: prepare v1.5.3'
+          git push origin HEAD:fix/weekly-plan-retry-loop
