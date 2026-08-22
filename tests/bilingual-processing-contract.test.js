@@ -44,7 +44,7 @@ function serviceFor(type) {
     research: {},
     learning: { accessUrl() { return 'https://learn.example.com/app'; } },
     books: {},
-    config: { enabled: true, apiKey: 'test-key' },
+    config: { enabled: true, apiKey: 'test-key', readingDocumentContract: 'v1' },
     logger
   });
 }
