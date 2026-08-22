@@ -17,7 +17,7 @@ function run(command, args, options = {}) {
   });
 }
 
-test('release verification requires a freshly fetched origin/main instead of silently skipping that gate', async () => {
+test('release verification explicitly refreshes authoritative origin/main and fails if remote main is unavailable', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kp-main-authority-'));
   const source = path.join(root, 'source');
   const deploy = path.join(root, 'deploy');
@@ -35,7 +35,22 @@ test('release verification requires a freshly fetched origin/main instead of sil
   assert.equal(run('git', ['config', '--unset-all', 'remote.origin.fetch'], { cwd: deploy }).status, 0);
   assert.equal(run('git', ['config', '--add', 'remote.origin.fetch', '+refs/tags/*:refs/tags/*'], { cwd: deploy }).status, 0);
 
-  const result = run('bash', ['-c', `
+  const repaired = run('bash', ['-c', `
+set -euo pipefail
+KP_DEPLOY_LIBRARY_ONLY=1
+source "$1"
+TEST_MODE=1
+DEPLOY_REPO="$2"
+RELEASE_TAG=v9.8.7
+EXPECTED_SHA="$3"
+resolve_release
+git -C "$2" rev-parse --verify refs/remotes/origin/main >/dev/null
+`, 'main-authority-repair-test', deployScript, deploy, sha]);
+  assert.equal(repaired.status, 0, `${repaired.stdout}\n${repaired.stderr}`);
+
+  assert.equal(run('git', ['branch', '-m', 'main', 'withdrawn'], { cwd: source }).status, 0);
+  assert.equal(run('git', ['update-ref', '-d', 'refs/remotes/origin/main'], { cwd: deploy }).status, 0);
+  const missing = run('bash', ['-c', `
 set -euo pipefail
 KP_DEPLOY_LIBRARY_ONLY=1
 source "$1"
@@ -44,12 +59,11 @@ DEPLOY_REPO="$2"
 RELEASE_TAG=v9.8.7
 EXPECTED_SHA="$3"
 if resolve_release; then
-  echo 'origin/main gate was silently skipped' >&2
+  echo 'release was accepted without authoritative remote main' >&2
   exit 20
 fi
-`, 'main-authority-test', deployScript, deploy, sha]);
-
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+`, 'main-authority-missing-test', deployScript, deploy, sha]);
+  assert.equal(missing.status, 0, `${missing.stdout}\n${missing.stderr}`);
 });
 
 test('graceful stop requires the exact process to exit, not only the listening port to clear', async () => {
