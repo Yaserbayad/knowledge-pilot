@@ -23,6 +23,7 @@ async function fixture() {
   const deployRepo = path.join(root, 'deploy-repo');
   await fs.mkdir(path.join(source, 'scripts'), { recursive: true });
   await fs.copyFile(engine, path.join(source, 'scripts', 'deploy-release.sh'));
+  await fs.copyFile(installer, path.join(source, 'scripts', 'install-deployer.sh'));
   assert.equal(run('git', ['init', '-b', 'main'], { cwd: source }).status, 0);
   assert.equal(run('git', ['config', 'user.email', 'ci@example.invalid'], { cwd: source }).status, 0);
   assert.equal(run('git', ['config', 'user.name', 'CI'], { cwd: source }).status, 0);
@@ -58,5 +59,18 @@ test('one-time installer fails closed for an unavailable exact source commit', a
     env: { KNOWLEDGE_PILOT_INSTALLER_TEST_MODE: '1', KP_INSTALL_TEST_ROOT: root }
   });
   assert.notEqual(result.status, 0);
+  await assert.rejects(fs.access(path.join(root, 'usr', 'local', 'sbin', 'deploy-knowledge-pilot')));
+});
+
+test('one-time installer rejects an uploaded installer whose bytes do not match the exact source commit', async () => {
+  const { root, sha } = await fixture();
+  const tampered = path.join(root, 'tampered-installer.sh');
+  await fs.copyFile(installer, tampered);
+  await fs.appendFile(tampered, '\n# tampered after review\n');
+  const result = run('bash', [tampered, sha], {
+    env: { KNOWLEDGE_PILOT_INSTALLER_TEST_MODE: '1', KP_INSTALL_TEST_ROOT: root }
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /integrity verification failed/i);
   await assert.rejects(fs.access(path.join(root, 'usr', 'local', 'sbin', 'deploy-knowledge-pilot')));
 });
