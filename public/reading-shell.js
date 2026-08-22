@@ -51,7 +51,7 @@ const state = {
   definitionTrigger: null,
   selection: null,
   positionTimer: 0,
-  saveInFlight: false,
+  saveInFlight: null,
   lastSavedPosition: '',
   modalReturnFocus: null
 };
@@ -165,6 +165,7 @@ function setShellDirection() {
 
 function closeReader() {
   state.open = false;
+  clearTimeout(state.positionTimer);
   root.hidden = true;
   root.replaceChildren();
   document.body.classList.remove('reading-shell-open');
@@ -198,34 +199,50 @@ async function refreshRecord() {
   return state.record;
 }
 
-async function saveExperience(patch = {}, mutation = null, retry = true) {
-  if (!state.open || state.saveInFlight) return null;
-  state.saveInFlight = true;
-  try {
-    const payload = {
-      baseRevision: state.experience?.revision || 0,
-      currentSectionId: patch.currentSectionId || state.activeSectionId || state.experience?.currentSectionId || 'cover',
-      anchorId: patch.anchorId !== undefined ? patch.anchorId : (state.activeBlockId || state.experience?.anchorId || ''),
-      completedSectionIds: patch.completedSectionIds || state.experience?.completedSectionIds || [],
-      selectedLanguage: patch.selectedLanguage || state.language,
-      sectionTotal: Math.max(1, state.document?.sections?.length || 1),
-      ...(patch.started !== undefined ? { started: patch.started } : {}),
-      ...(patch.confidence ? { confidence: patch.confidence } : {}),
-      ...(mutation ? { mutation } : {})
-    };
-    const saved = await api(experiencePath(), { method: 'POST', body: JSON.stringify(payload) });
-    state.experience = { ...state.experience, ...(saved.experience || {}), revision: saved.revision ?? saved.experience?.revision ?? state.experience?.revision };
-    if (state.record) state.record.resumePercent = saved.resumePercent ?? state.record.resumePercent;
-    return saved;
-  } catch (error) {
-    if (error.status === 409 && retry) {
-      await refreshRecord();
-      return saveExperience(patch, mutation, false);
+async function performExperienceSave(patch = {}, mutation = null, retry = true) {
+  let canRetry = retry;
+  while (state.open) {
+    try {
+      const payload = {
+        baseRevision: state.experience?.revision || 0,
+        currentSectionId: patch.currentSectionId || state.activeSectionId || state.experience?.currentSectionId || 'cover',
+        anchorId: patch.anchorId !== undefined ? patch.anchorId : (state.activeBlockId || state.experience?.anchorId || ''),
+        completedSectionIds: patch.completedSectionIds || state.experience?.completedSectionIds || [],
+        selectedLanguage: patch.selectedLanguage || state.language,
+        sectionTotal: Math.max(1, state.document?.sections?.length || 1),
+        ...(patch.started !== undefined ? { started: patch.started } : {}),
+        ...(patch.confidence ? { confidence: patch.confidence } : {}),
+        ...(mutation ? { mutation } : {})
+      };
+      const saved = await api(experiencePath(), { method: 'POST', body: JSON.stringify(payload) });
+      state.experience = { ...state.experience, ...(saved.experience || {}), revision: saved.revision ?? saved.experience?.revision ?? state.experience?.revision };
+      if (state.record) state.record.resumePercent = saved.resumePercent ?? state.record.resumePercent;
+      return saved;
+    } catch (error) {
+      if (error.status === 409 && canRetry) {
+        canRetry = false;
+        await refreshRecord();
+        continue;
+      }
+      toast(error.message, 'error');
+      return null;
     }
-    toast(error.message, 'error');
-    return null;
+  }
+  return null;
+}
+
+async function saveExperience(patch = {}, mutation = null, retry = true) {
+  if (!state.open) return null;
+  while (state.saveInFlight) {
+    try { await state.saveInFlight; } catch {}
+    if (!state.open) return null;
+  }
+  const run = performExperienceSave(patch, mutation, retry);
+  state.saveInFlight = run;
+  try {
+    return await run;
   } finally {
-    state.saveInFlight = false;
+    if (state.saveInFlight === run) state.saveInFlight = null;
   }
 }
 
@@ -670,9 +687,10 @@ function scrollToSection(sectionId) {
 
 async function switchLanguage() {
   const blockId = state.activeBlockId;
-  state.language = state.language === 'ar' ? 'en' : 'ar';
-  const saved = await saveExperience({ selectedLanguage: state.language, anchorId: blockId, currentSectionId: state.activeSectionId });
+  const nextLanguage = state.language === 'ar' ? 'en' : 'ar';
+  const saved = await saveExperience({ selectedLanguage: nextLanguage, anchorId: blockId, currentSectionId: state.activeSectionId });
   if (!saved) return;
+  state.language = nextLanguage;
   renderReader();
   requestAnimationFrame(() => root.querySelector(`[data-block-id="${cssEscape(blockId)}"]`)?.scrollIntoView({ block: 'start', behavior: 'auto' }));
 }
@@ -730,21 +748,24 @@ function closeDefinition(restore = true) {
   state.definitionTrigger = null;
 }
 
+function updateSelectionTracking() {
+  const selection = getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) { state.selection = null; return; }
+  const range = selection.getRangeAt(0);
+  const common = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
+  if (!common || !root.contains(common)) { state.selection = null; return; }
+  const passage = selection.toString().replace(/\s+/g, ' ').trim().slice(0, 1200);
+  if (!passage) { state.selection = null; return; }
+  const block = common.closest?.('[data-block-id]');
+  const section = common.closest?.('[data-section-id]');
+  state.selection = { passage, anchorId: block?.dataset.blockId || state.activeBlockId, sectionId: section?.dataset.sectionId || state.activeSectionId };
+}
+
 function setupSelectionTracking() {
-  const update = () => {
-    const selection = getSelection();
-    if (!selection || selection.isCollapsed || !selection.rangeCount) { state.selection = null; return; }
-    const range = selection.getRangeAt(0);
-    const common = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
-    if (!common || !root.contains(common)) { state.selection = null; return; }
-    const passage = selection.toString().replace(/\s+/g, ' ').trim().slice(0, 1200);
-    if (!passage) { state.selection = null; return; }
-    const block = common.closest?.('[data-block-id]');
-    const section = common.closest?.('[data-section-id]');
-    state.selection = { passage, anchorId: block?.dataset.blockId || state.activeBlockId, sectionId: section?.dataset.sectionId || state.activeSectionId };
-  };
-  root.addEventListener('mouseup', update);
-  root.addEventListener('keyup', update);
+  root.removeEventListener('mouseup', updateSelectionTracking);
+  root.removeEventListener('keyup', updateSelectionTracking);
+  root.addEventListener('mouseup', updateSelectionTracking);
+  root.addEventListener('keyup', updateSelectionTracking);
 }
 
 async function saveHighlight() {
@@ -1022,6 +1043,7 @@ async function syncFromHash() {
   if (!route) {
     if (state.open) {
       state.open = false;
+      clearTimeout(state.positionTimer);
       root.hidden = true;
       root.replaceChildren();
       document.body.classList.remove('reading-shell-open');
