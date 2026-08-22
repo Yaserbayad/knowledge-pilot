@@ -152,3 +152,17 @@ test('a legacy failed weekly-plan validator rejection is relisted and reclaimabl
   const claimed = await businessActions.claim(taskId);
   assert.equal(claimed.status, 'claimed');
 });
+
+test('a substantive failure mentioning a validator is not made retryable without a prior retryable rejection', async () => {
+  const { store, businessActions, taskId } = await fixture();
+
+  await businessActions.fail(
+    taskId,
+    'A substantive evidence validator found the requested plan cannot be completed accurately.'
+  );
+
+  const task = store.snapshot().businessTasks[taskId];
+  assert.equal(task.status, 'failed');
+  assert.equal(task.lastSubmissionError, null);
+  assert.equal(businessActions.list({ status: 'pending', limit: 20 }).some((item) => item.id === taskId), false);
+});
