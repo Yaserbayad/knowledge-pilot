@@ -14,6 +14,17 @@ function initReadingShellAccessibility() {
     if (main) main.inert = value;
   };
 
+  const sanitizeSourceLinks = () => {
+    for (const link of root.querySelectorAll('.reading-source-list a[href]')) {
+      try {
+        const url = new URL(link.getAttribute('href'), location.origin);
+        if (!['http:', 'https:'].includes(url.protocol)) link.removeAttribute('href');
+      } catch {
+        link.removeAttribute('href');
+      }
+    }
+  };
+
   const restoreWorkspace = () => {
     if (!active) return;
     setWorkspaceInert(false);
@@ -27,6 +38,7 @@ function initReadingShellAccessibility() {
   };
 
   const sync = () => {
+    sanitizeSourceLinks();
     const readerReady = !root.hidden && Boolean(root.querySelector('.reading-sticky'));
     if (!readerReady) {
       restoreWorkspace();
