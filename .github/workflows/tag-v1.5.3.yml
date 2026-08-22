@@ -1,0 +1,39 @@
+name: Temporary tag v1.5.3
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/tag-v1.5.3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish exact release tag
+        shell: bash
+        env:
+          TARGET_SHA: 6d1506add03895eaedc5d471cd552eadd24403db
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+          test "$(git show "$TARGET_SHA:VERSION")" = "1.5.3"
+          git show "$TARGET_SHA:package.json" | node -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{if(JSON.parse(s).version!=='1.5.3')process.exit(1)})"
+          git show "$TARGET_SHA:src/version.js" | grep -Fq "APP_VERSION = '1.5.3'"
+          git show "$TARGET_SHA:scripts/deploy-release.sh" | grep -Fq 'nginx -s reload || return 1'
+          if git rev-parse -q --verify refs/tags/v1.5.3 >/dev/null; then
+            test "$(git rev-list -n1 v1.5.3)" = "$TARGET_SHA"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a v1.5.3 "$TARGET_SHA" -m 'Knowledge Pilot v1.5.3'
+          git push origin refs/tags/v1.5.3
