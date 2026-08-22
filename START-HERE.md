@@ -23,6 +23,8 @@ sudo deploy-knowledge-pilot vX.Y.Z <EXPECTED_40_CHARACTER_COMMIT_SHA>
 
 The permanent command performs the complete safe lifecycle: exclusive lock, actual-process and healthy-baseline preflight, exact aaPanel Node-toolchain capture, read-only Git release verification, clean `git archive` staging, full application and Workspace Agent verification/audits, rollback snapshot, graceful aaPanel cutover, clean release-file replacement, explicit startup as `www`, actual runtime verification, authenticated local smoke, server integration, external HTTPS smoke, and automatic verified rollback after a post-cutover failure.
 
+Before staged application verification can pass, the release's `scripts/deploy-release.sh` must be byte-for-byte identical to the installed permanent engine. If deployment-engine source changed, the ordinary release fails safely before live mutation and the reviewed engine must be deliberately reinstalled first.
+
 The command preserves exactly `.env`, `data/`, and server-owned `.well-known/` when present. `data/` is treated as runtime-owned state: deployment preserves its existing ownership and permission metadata as well as its contents. The command does not carry stale release source, old `automation/`, `node_modules/`, `.git/`, or obsolete release files into the new release.
 
 Never deploy from `main`, `latest`, a feature branch, a working directory, or an unverified tag. Never start a second process manager because a shell-level PM2 view is empty.
