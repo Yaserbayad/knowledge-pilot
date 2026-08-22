@@ -65,7 +65,7 @@ export class BusinessActionsService extends CoreBusinessActionsService {
 
   async submit(taskId, result) {
     const task = this.store.read((state) => state.businessTasks?.[taskId]);
-    if (task && BILINGUAL_TASK_TYPES.has(task.type)) {
+    if (this.config.readingDocumentContract === 'v1' && task && BILINGUAL_TASK_TYPES.has(task.type)) {
       normalizeReadingDocument(result?.readingDocument, { required: true });
     }
     return super.submit(taskId, result);
