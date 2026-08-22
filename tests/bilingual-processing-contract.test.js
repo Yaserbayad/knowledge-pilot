@@ -16,6 +16,7 @@ function serviceFor(type, { marked = true } = {}) {
   const task = {
     id: 'task_1', type, userId: user.id, status: 'pending', priority: 80,
     payload: { ...basePayload, ...(marked ? { readingDocumentContract: 'v1' } : {}) },
+    attempts: 0, claimedAt: null, submissionRejectCount: 0,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
   };
   const state = {
@@ -54,7 +55,7 @@ function serviceFor(type, { marked = true } = {}) {
 
 for (const type of ['lesson', 'book_session']) {
   test(`${type} task marked v1 requires one bounded English/Arabic ReadingDocument`, async () => {
-    const { service } = serviceFor(type);
+    const { service, state } = serviceFor(type);
     const context = service.getTask('task_1');
     assert.equal(context.readingDocumentContract?.version, 1);
     assert.deepEqual(context.readingDocumentContract?.languages, ['en', 'ar']);
@@ -62,12 +63,73 @@ for (const type of ['lesson', 'book_session']) {
     assert.match(context.taskInstructions, /Telegram\/WhatsApp/);
     assert.ok(context.resultContract.readingDocument, 'readingDocument must be declared in the result contract');
 
+    const blockContract = context.resultContract.readingDocument.sections[0].blocks[0];
+    assert.ok(Array.isArray(blockContract.items), 'items must expose an explicit structured shape');
+    assert.ok(Array.isArray(blockContract.steps), 'steps must expose an explicit structured shape');
+    assert.ok(Array.isArray(blockContract.columns), 'columns must expose an explicit bilingual shape');
+    assert.ok(Array.isArray(blockContract.rows), 'rows must expose an explicit structured shape');
+    assert.ok(Array.isArray(blockContract.options), 'options must expose an explicit structured shape');
+    assert.equal(blockContract.expectedOptionId, 'required when options are supplied');
+
+    await service.claim('task_1');
     await assert.rejects(
       service.submit('task_1', { verification: { finalAudit: {} }, sources: [] }),
-      (error) => error.code === 'INVALID_READING_DOCUMENT'
+      (error) => error.code === 'RESULT_CONTRACT_INVALID' && error.statusCode === 422 && error.retryable === true
     );
+    assert.equal(state.businessTasks.task_1.status, 'pending');
+    assert.equal(state.businessTasks.task_1.claimedAt, null);
+    assert.equal(state.businessTasks.task_1.submissionRejectCount, 1);
+    assert.equal(state.businessTasks.task_1.lastSubmissionError?.code, 'RESULT_CONTRACT_INVALID');
+    assert.equal(state.businessTasks.task_1.lastSubmissionError?.retryable, true);
+    assert.equal(state.businessTasks.task_1.lastSubmissionError?.diagnostics?.contract, 'reading-document.v1');
   });
 }
+
+test('reported ReadingDocument schema mismatch remains retryable for a book session', async () => {
+  const { service, state } = serviceFor('book_session');
+  await service.claim('task_1');
+  const task = await service.fail('task_1', 'Submission-schema mismatch for the required bilingual ReadingDocument v1');
+  assert.equal(task.status, 'pending');
+  assert.equal(task.claimedAt, null);
+  assert.equal(task.lastSubmissionError?.code, 'CLIENT_REPORTED_CONTRACT_ERROR');
+  assert.equal(task.lastSubmissionError?.retryable, true);
+  assert.equal(state.businessTasks.task_1.status, 'pending');
+});
+
+test('a v1 task terminally failed by the 1.5.0 schema bug is discoverable and repaired when claimed', async () => {
+  const { service, state } = serviceFor('book_session');
+  state.businessTasks.task_1.status = 'failed';
+  state.businessTasks.task_1.claimedAt = '2026-08-22T12:58:00.000Z';
+  state.businessTasks.task_1.error = 'Submission-schema mismatch for the required bilingual ReadingDocument v1';
+
+  const pending = service.list({ status: 'pending', limit: 20 });
+  const recoveredSummary = pending.find((task) => task.id === 'task_1');
+  assert.ok(recoveredSummary, 'recoverable v1 integration failure must be discoverable as pending');
+  assert.equal(recoveredSummary.status, 'pending');
+
+  const context = service.getTask('task_1');
+  assert.equal(context.task.status, 'pending');
+  assert.equal(context.retryingPriorIntegrationFailure, true);
+
+  const claimed = await service.claim('task_1');
+  assert.equal(claimed.status, 'claimed');
+  assert.ok(claimed.claimedAt);
+  assert.equal(claimed.lastSubmissionError?.code, 'CLIENT_REPORTED_CONTRACT_ERROR');
+  assert.equal(claimed.lastSubmissionError?.retryable, true);
+  assert.equal(state.businessTasks.task_1.status, 'claimed');
+});
+
+test('a genuine failed v1 content task remains failed and is not auto-recovered', async () => {
+  const { service, state } = serviceFor('book_session');
+  state.businessTasks.task_1.status = 'failed';
+  state.businessTasks.task_1.error = 'Reliable completion is impossible because the owned source text is unavailable';
+
+  assert.equal(service.list({ status: 'pending', limit: 20 }).some((task) => task.id === 'task_1'), false);
+  const context = service.getTask('task_1');
+  assert.equal(context.task.status, 'failed');
+  assert.equal(context.retryingPriorIntegrationFailure, undefined);
+  await assert.rejects(service.claim('task_1'), /cannot be claimed from status failed/i);
+});
 
 test('new lesson tasks are marked v1 while an existing pre-upgrade task remains on its legacy contract', async () => {
   const fresh = serviceFor('lesson');
