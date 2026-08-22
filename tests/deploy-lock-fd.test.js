@@ -15,11 +15,11 @@ KP_DEPLOY_LIBRARY_ONLY=1
 source "$1"
 AAPANEL_START_SCRIPT=/bin/true
 AAPANEL_PID_FILE="$2/aapanel.pid"
+LEAK_MARKER="$2/lock-fd-leaked"
 RUNTIME_USER=www
 runuser() {
   if [[ -e /proc/$$/fd/9 ]]; then
-    echo 'deployment lock descriptor leaked into application startup' >&2
-    return 91
+    printf 'deployment lock descriptor leaked into application startup\\n' > "$LEAK_MARKER"
   fi
   return 0
 }
@@ -30,6 +30,7 @@ exec 9>"$2/deploy.lock"
 flock -n 9
 start_application_as_runtime_user
 [[ "$(cat "$AAPANEL_PID_FILE")" == 4242 ]]
+[[ ! -e "$LEAK_MARKER" ]]
 [[ -e /proc/$$/fd/9 ]]
 `, 'lock-fd-test', deployScript, root], { encoding: 'utf8' });
 
