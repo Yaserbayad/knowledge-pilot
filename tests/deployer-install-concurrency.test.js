@@ -21,6 +21,7 @@ test('deployer installation refuses to replace the engine while an application d
   const deployRepo = path.join(root, 'deploy-repo');
   await fs.mkdir(path.join(source, 'scripts'), { recursive: true });
   await fs.writeFile(path.join(source, 'scripts', 'deploy-release.sh'), '#!/usr/bin/env bash\nset -euo pipefail\n[[ "${1:-}" == "--self-test" ]] && { printf "SELF_TEST=PASS\\n"; exit 0; }\n');
+  await fs.copyFile(installer, path.join(source, 'scripts', 'install-deployer.sh'));
 
   assert.equal(run('git', ['init', '-b', 'main'], { cwd: source }).status, 0);
   assert.equal(run('git', ['config', 'user.email', 'ci@example.invalid'], { cwd: source }).status, 0);
