@@ -96,6 +96,19 @@ verify_deploy_repo_origin() {
   esac
 }
 
+verify_installer_source_integrity() (
+  set -Eeuo pipefail
+  local source_sha="$1" source_path expected expected_hash actual_hash
+  source_path="$(readlink -f "${BASH_SOURCE[0]}")"
+  [[ -f "$source_path" ]] || return 1
+  expected="$(mktemp)"
+  trap 'rm -f "$expected"' EXIT
+  git -C "$DEPLOY_REPO" show "$source_sha:scripts/install-deployer.sh" > "$expected" || return 1
+  expected_hash="$(sha256sum "$expected" | awk '{print $1}')"
+  actual_hash="$(sha256sum "$source_path" | awk '{print $1}')"
+  [[ "$actual_hash" == "$expected_hash" ]]
+)
+
 main() {
   configure_installer_paths || return 1
   if (( INSTALL_TEST_MODE == 0 )); then
@@ -115,9 +128,11 @@ main() {
   exec 8>"$DEPLOY_LOCK_FILE"
   flock -n 8 || { printf 'An application deployment is active; deployer installation refused.\n' >&2; return 1; }
 
-  git -C "$DEPLOY_REPO" fetch --prune origin >/dev/null
+  git -C "$DEPLOY_REPO" fetch --prune origin +refs/heads/main:refs/remotes/origin/main >/dev/null
+  git -C "$DEPLOY_REPO" rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1 || { printf 'origin/main is unavailable.\n' >&2; return 1; }
   [[ "$(git -C "$DEPLOY_REPO" cat-file -t "$source_sha" 2>/dev/null)" == "commit" ]] || { printf 'Engine source commit is unavailable.\n' >&2; return 1; }
   git -C "$DEPLOY_REPO" merge-base --is-ancestor "$source_sha" refs/remotes/origin/main || { printf 'Engine source commit is not on origin/main.\n' >&2; return 1; }
+  verify_installer_source_integrity "$source_sha" || { printf 'Installer source integrity verification failed.\n' >&2; return 1; }
 
   tmp="$(mktemp)"
   trap 'rm -f "${tmp:-}" "${TARGET:-}.new"' EXIT
