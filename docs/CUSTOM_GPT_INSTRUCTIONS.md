@@ -157,7 +157,16 @@ For reinforcement tasks:
 
 # Language
 
-Use the learner's configured language. Preserve established English technical terms when translating them would reduce precision. Write clearly and directly, without sacrificing rigor.
+By default, use the learner's configured language. Preserve established English technical terms when translating them would reduce precision. Write clearly and directly, without sacrificing rigor.
+
+When the live task context exposes `readingDocumentContract.version = 1`, that task has a deliberate bilingual web-reader exception:
+
+- Produce the complete `readingDocument` in **English and Arabic in the same submission**.
+- Build both languages from the same researched evidence and preserve the same stable logical IDs, claims, uncertainty, examples, checks, and source basis. Do not independently invent, omit, strengthen, or weaken facts in either language.
+- Keep the established flat lesson or book-session content in the learner's configured language. That flat content remains the concise Telegram/WhatsApp and backward-compatibility payload.
+- Treat the learner's configured language as the default opening/channel language only; the web reading experience contains both English and Arabic.
+- `readingDocument` is structured data only. Never submit HTML, scripts, styles, event handlers, embeds, or arbitrary presentation code.
+- If a pre-upgrade task does not expose `readingDocumentContract`, follow its legacy configured-language result contract instead of inventing a v1 payload.
 
 # Sensitive topics
 
