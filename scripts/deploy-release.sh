@@ -92,7 +92,7 @@ configure_paths() {
 
 require_commands() {
   local command
-  for command in bash flock git tar rsync stat ss runuser curl awk sed grep readlink find chown chmod df du seq sort cut basename head install mktemp dirname tr id sleep kill; do
+  for command in bash flock git tar rsync stat ss runuser curl awk sed grep readlink find chown chmod df du seq sort cut basename head install mktemp dirname tr id sleep kill sha256sum; do
     command -v "$command" >/dev/null 2>&1 || { printf 'Missing required command: %s\n' "$command" >&2; return 1; }
   done
   if (( TEST_MODE == 0 )); then
@@ -347,6 +347,15 @@ workspace_agent_topology_matches() {
   [[ "${1:-}" == "${2:-}" ]]
 }
 
+installed_engine_matches_stage() {
+  local installed_path installed_hash staged_hash
+  installed_path="$(readlink -f "${BASH_SOURCE[0]}")" || return 1
+  [[ -f "$installed_path" && -f "$STAGE/scripts/deploy-release.sh" ]] || return 1
+  installed_hash="$(sha256sum "$installed_path" | awk '{print $1}')" || return 1
+  staged_hash="$(sha256sum "$STAGE/scripts/deploy-release.sh" | awk '{print $1}')" || return 1
+  [[ "$installed_hash" == "$staged_hash" ]]
+}
+
 verify_stage_identity() {
   [[ -f "$STAGE/VERSION" && -f "$STAGE/package.json" && -f "$STAGE/src/index.js" ]] || return 1
   [[ "$(tr -d '[:space:]' < "$STAGE/VERSION")" == "$RELEASE_VERSION" ]] || return 1
@@ -358,6 +367,7 @@ verify_stage_identity() {
   [[ -d "$STAGE/automation/workspace-agent" ]] && stage_workspace=1
   workspace_agent_topology_matches "$live_workspace" "$stage_workspace" || return 1
   grep -Fq "ENGINE_COMPATIBILITY=\"$ENGINE_COMPATIBILITY\"" "$STAGE/scripts/deploy-release.sh" || return 1
+  installed_engine_matches_stage || return 1
 }
 
 prepare_stage() {
