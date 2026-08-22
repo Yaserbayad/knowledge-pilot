@@ -10,12 +10,12 @@ function serviceFor(type, { marked = true } = {}) {
     interests: [], rankedTopics: [], avoidedTopics: [], exampleQuestions: [], knowledgeRatings: {}, mastery: {}, preferredWindows: [],
     automation: { notifyActionRequired: false }
   };
+  const basePayload = type === 'lesson'
+    ? { planId: 'plan_1', proposalId: 'proposal_1' }
+    : { bookId: 'book_1', planId: 'book_plan_1', sessionNumber: 1 };
   const task = {
     id: 'task_1', type, userId: user.id, status: 'pending', priority: 80,
-    ...(marked ? { readingDocumentContract: 'v1' } : {}),
-    payload: type === 'lesson'
-      ? { planId: 'plan_1', proposalId: 'proposal_1' }
-      : { bookId: 'book_1', planId: 'book_plan_1', sessionNumber: 1 },
+    payload: { ...basePayload, ...(marked ? { readingDocumentContract: 'v1' } : {}) },
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
   };
   const state = {
@@ -73,7 +73,7 @@ test('new lesson tasks are marked v1 while an existing pre-upgrade task remains 
   const fresh = serviceFor('lesson');
   delete fresh.state.businessTasks.task_1;
   const queued = await fresh.service.queue('lesson', 'reader', { planId: 'plan_1', proposalId: 'proposal_1' }, { dedupeKey: 'new-reader-contract' });
-  assert.equal(queued.task.readingDocumentContract, 'v1');
+  assert.equal(queued.task.payload.readingDocumentContract, 'v1');
   assert.equal(fresh.service.getTask(queued.task.id).readingDocumentContract?.version, 1);
 
   const legacy = serviceFor('lesson', { marked: false });
