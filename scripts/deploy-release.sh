@@ -615,6 +615,7 @@ configure_workspace_agent_server() {
   ) || return 1
   systemctl daemon-reload || return 1
   nginx -t || return 1
+  nginx -s reload || return 1
   systemctl restart "$WORKSPACE_MCP_SERVICE" || return 1
   systemctl is-active --quiet "$WORKSPACE_MCP_SERVICE" || return 1
 }

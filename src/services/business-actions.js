@@ -3,6 +3,7 @@ import { READING_BLOCK_TYPES, normalizeReadingDocument } from './reading-documen
 
 const BILINGUAL_TASK_TYPES = new Set(['lesson', 'book_session', 'book_finale']);
 const RETRYABLE_INTEGRATION_PATTERN = /readingdocument|result[- ]contract|submission[- ]schema|schema(?: mismatch| validation| error)?|parsing|integration|server[- ]side result/i;
+const WEEKLY_PLAN_TOPIC_RULE = 'For weekly plans, proposal.topic is the validator subject-allocation label: for at least two of the three proposals, set proposal.topic exactly equal to primarySubject using the same wording (comparison is case-insensitive). Put narrower subtopic specificity in the proposal title, question, and reason instead of replacing the subject-allocation topic.';
 
 const READING_DOCUMENT_CONTRACT = Object.freeze({
   version: 1,
@@ -84,6 +85,14 @@ function recoverableReadingFailure(task) {
     && RETRYABLE_INTEGRATION_PATTERN.test(retryableIntegrationMessage(task));
 }
 
+function recoverableRetryableFailure(task) {
+  return recoverableReadingFailure(task) || (
+    task?.type !== 'book_analysis'
+    && task?.status === 'failed'
+    && task?.lastSubmissionError?.retryable === true
+  );
+}
+
 function taskSummary(task, status = task.status) {
   return {
     id: task.id,
@@ -97,6 +106,30 @@ function taskSummary(task, status = task.status) {
     error: task.error || null,
     submissionRejectCount: Number(task.submissionRejectCount || 0),
     lastSubmissionError: task.lastSubmissionError || null
+  };
+}
+
+function addWeeklyPlanContract(context) {
+  const resultContract = context?.resultContract && typeof context.resultContract === 'object'
+    ? context.resultContract
+    : {};
+  const proposalShape = Array.isArray(resultContract.proposals)
+    && resultContract.proposals[0]
+    && typeof resultContract.proposals[0] === 'object'
+    ? resultContract.proposals[0]
+    : null;
+  return {
+    ...context,
+    taskInstructions: `${WEEKLY_PLAN_TOPIC_RULE} ${context.taskInstructions}`,
+    resultContract: proposalShape
+      ? {
+          ...resultContract,
+          proposals: [{
+            ...proposalShape,
+            topic: 'string; for at least two proposals exactly equal primarySubject'
+          }]
+        }
+      : resultContract
   };
 }
 
@@ -140,7 +173,7 @@ export class BusinessActionsService extends CoreBusinessActionsService {
     const limit = Math.min(Math.max(Number(options.limit) || 20, 1), 100);
     const normal = super.list({ status: 'pending', limit: 100 });
     const recovered = this.store.read((state) => Object.values(state.businessTasks || {})
-      .filter(recoverableReadingFailure)
+      .filter(recoverableRetryableFailure)
       .map((task) => taskSummary(task, 'pending')));
     const combined = new Map(normal.map((task) => [task.id, task]));
     for (const task of recovered) combined.set(task.id, task);
@@ -152,14 +185,17 @@ export class BusinessActionsService extends CoreBusinessActionsService {
   getTask(taskId) {
     const context = super.getTask(taskId);
     const task = this.store.read((state) => state.businessTasks?.[taskId]);
-    const recoveredContext = recoverableReadingFailure(task)
+    const recoveredContext = recoverableRetryableFailure(task)
       ? {
           ...context,
           task: { ...context.task, status: 'pending' },
           retryingPriorIntegrationFailure: true
         }
       : context;
-    return taskUsesReadingDocument(task) ? addBilingualContract(recoveredContext) : recoveredContext;
+    const contractContext = task?.type === 'weekly_plan'
+      ? addWeeklyPlanContract(recoveredContext)
+      : recoveredContext;
+    return taskUsesReadingDocument(task) ? addBilingualContract(contractContext) : contractContext;
   }
 
   async #recordRetryableContractError(taskId, error, { reuseExisting = false } = {}) {
@@ -194,7 +230,7 @@ export class BusinessActionsService extends CoreBusinessActionsService {
 
   async claim(taskId) {
     const task = this.store.read((state) => state.businessTasks?.[taskId]);
-    if (recoverableReadingFailure(task)) {
+    if (recoverableRetryableFailure(task)) {
       const error = Object.assign(new Error(retryableIntegrationMessage(task)), {
         code: 'CLIENT_REPORTED_CONTRACT_ERROR'
       });
@@ -221,6 +257,9 @@ export class BusinessActionsService extends CoreBusinessActionsService {
   async fail(taskId, reason) {
     const task = this.store.read((state) => state.businessTasks?.[taskId]);
     const message = String(reason || 'Unspecified failure').trim().slice(0, 2000);
+    if (task?.type !== 'book_analysis' && task?.lastSubmissionError?.retryable === true) {
+      return this.#recordRetryableContractError(taskId, task.lastSubmissionError, { reuseExisting: true });
+    }
     if (task?.type !== 'book_analysis' && RETRYABLE_INTEGRATION_PATTERN.test(message)) {
       const error = Object.assign(new Error(`Retryable integration issue reported by the GPT: ${message}`), {
         code: 'CLIENT_REPORTED_CONTRACT_ERROR'
