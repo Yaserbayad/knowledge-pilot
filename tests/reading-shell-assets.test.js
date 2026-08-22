@@ -46,6 +46,23 @@ test('reading shell preserves bilingual position, RTL, outline/focus, steppers, 
   assert.match(css, /\.reading-progress/);
 });
 
+test('reader experience writes serialize instead of dropping user actions during an in-flight position save', async () => {
+  const js = await read('../public/reading-shell.js');
+  assert.doesNotMatch(js, /!state\.open\s*\|\|\s*state\.saveInFlight\)\s*return null/);
+  assert.match(js, /while\s*\(state\.saveInFlight\)/);
+  assert.match(js, /const nextLanguage = state\.language === 'ar' \? 'en' : 'ar'/);
+  assert.match(js, /state\.language = nextLanguage/);
+});
+
+test('selection tracking keeps one stable listener pair across language rerenders', async () => {
+  const js = await read('../public/reading-shell.js');
+  assert.match(js, /function updateSelectionTracking\(\)/);
+  assert.match(js, /removeEventListener\('mouseup', updateSelectionTracking\)/);
+  assert.match(js, /removeEventListener\('keyup', updateSelectionTracking\)/);
+  assert.match(js, /addEventListener\('mouseup', updateSelectionTracking\)/);
+  assert.match(js, /addEventListener\('keyup', updateSelectionTracking\)/);
+});
+
 test('service worker caches only the new static reader assets, never reader API payloads', async () => {
   const sw = await read('../public/sw.js');
   assert.match(sw, /\/assets\/reading-shell\.css/);
