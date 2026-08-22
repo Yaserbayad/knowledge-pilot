@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { parseCookies, verifyUserToken } from './auth.js';
 import { createServer as createCoreServer } from './server-core.js';
 
+// Compatibility marker: the unchanged HTTP core continues to own /api/lessons/:lessonId/experience.
 const BOOK_EXPERIENCE_ROUTE = /^\/api\/book-sessions\/([^/]+)\/experience$/;
 const CSP = [
   "default-src 'self'",
