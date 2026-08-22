@@ -54,6 +54,9 @@ jobs:
         with:
           ref: fix/reading-document-retry-contract
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Bump exact release identity once
         shell: bash
         run: |
@@ -80,7 +83,7 @@ jobs:
                   raise SystemExit(f'{filename}: expected at least {count} occurrence(s) of {old!r}')
               path.write_text(text.replace(old, new, count))
           PY
-          node tests/release-identity.test.js
+          node --test tests/release-integrity.test.js
           git diff --check
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
