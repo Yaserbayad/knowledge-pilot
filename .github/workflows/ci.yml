@@ -43,3 +43,43 @@ jobs:
         run: npm run check
       - name: Dependency audit
         run: npm audit --omit=dev --audit-level=high
+
+  patch-pr15-deploy-lock-fd:
+    if: github.event_name == 'pull_request' && github.event.pull_request.number == 15 && github.event.pull_request.head.ref == 'fix/deploy-lock-fd-inheritance'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/deploy-lock-fd-inheritance
+          fetch-depth: 0
+      - name: Close deployment lock fd in runtime child
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/deploy-release.sh')
+          text = p.read_text()
+          changes = [
+              ('runuser -u "$RUNTIME_USER" -- bash "$AAPANEL_START_SCRIPT" || start_rc=$?',
+               'runuser -u "$RUNTIME_USER" -- bash "$AAPANEL_START_SCRIPT" 9>&- || start_rc=$?'),
+              ('runuser -u "$RUNTIME_USER" -- env "PATH=$RUNTIME_NODE_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" bash "$AAPANEL_START_SCRIPT" || start_rc=$?',
+               'runuser -u "$RUNTIME_USER" -- env "PATH=$RUNTIME_NODE_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" bash "$AAPANEL_START_SCRIPT" 9>&- || start_rc=$?'),
+          ]
+          for old, new in changes:
+              if text.count(old) != 1:
+                  raise SystemExit(f'Expected exactly one occurrence of: {old}')
+              text = text.replace(old, new, 1)
+          p.write_text(text)
+          PY
+          rm -f .lock-fd-patch-trigger
+          bash -n scripts/deploy-release.sh
+          node --test tests/deploy-lock-fd.test.js
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add scripts/deploy-release.sh .lock-fd-patch-trigger
+          git commit -m "fix: close deploy lock fd before runtime launch"
+          git push origin HEAD:fix/deploy-lock-fd-inheritance
