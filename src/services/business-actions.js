@@ -74,6 +74,32 @@ function taskUsesReadingDocument(task) {
   return BILINGUAL_TASK_TYPES.has(task?.type) && task?.payload?.readingDocumentContract === 'v1';
 }
 
+function retryableIntegrationMessage(task) {
+  return String(task?.lastSubmissionError?.message || task?.error || '');
+}
+
+function recoverableReadingFailure(task) {
+  return taskUsesReadingDocument(task)
+    && task?.status === 'failed'
+    && RETRYABLE_INTEGRATION_PATTERN.test(retryableIntegrationMessage(task));
+}
+
+function taskSummary(task, status = task.status) {
+  return {
+    id: task.id,
+    type: task.type,
+    userId: task.userId,
+    status,
+    priority: task.priority,
+    createdAt: task.createdAt,
+    claimedAt: status === 'pending' ? null : (task.claimedAt || null),
+    updatedAt: task.updatedAt,
+    error: task.error || null,
+    submissionRejectCount: Number(task.submissionRejectCount || 0),
+    lastSubmissionError: task.lastSubmissionError || null
+  };
+}
+
 function addBilingualContract(context) {
   return {
     ...context,
@@ -108,10 +134,32 @@ export class BusinessActionsService extends CoreBusinessActionsService {
     return super.queue(type, userId, versionedPayload, options);
   }
 
+  list(options = {}) {
+    const status = options.status || 'pending';
+    if (status !== 'pending') return super.list(options);
+    const limit = Math.min(Math.max(Number(options.limit) || 20, 1), 100);
+    const normal = super.list({ status: 'pending', limit: 100 });
+    const recovered = this.store.read((state) => Object.values(state.businessTasks || {})
+      .filter(recoverableReadingFailure)
+      .map((task) => taskSummary(task, 'pending')));
+    const combined = new Map(normal.map((task) => [task.id, task]));
+    for (const task of recovered) combined.set(task.id, task);
+    return [...combined.values()]
+      .sort((a, b) => b.priority - a.priority || a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit);
+  }
+
   getTask(taskId) {
     const context = super.getTask(taskId);
     const task = this.store.read((state) => state.businessTasks?.[taskId]);
-    return taskUsesReadingDocument(task) ? addBilingualContract(context) : context;
+    const recoveredContext = recoverableReadingFailure(task)
+      ? {
+          ...context,
+          task: { ...context.task, status: 'pending' },
+          retryingPriorIntegrationFailure: true
+        }
+      : context;
+    return taskUsesReadingDocument(task) ? addBilingualContract(recoveredContext) : recoveredContext;
   }
 
   async #recordRetryableContractError(taskId, error, { reuseExisting = false } = {}) {
@@ -142,6 +190,17 @@ export class BusinessActionsService extends CoreBusinessActionsService {
       task.updatedAt = now;
       return task;
     });
+  }
+
+  async claim(taskId) {
+    const task = this.store.read((state) => state.businessTasks?.[taskId]);
+    if (recoverableReadingFailure(task)) {
+      const error = Object.assign(new Error(retryableIntegrationMessage(task)), {
+        code: 'CLIENT_REPORTED_CONTRACT_ERROR'
+      });
+      await this.#recordRetryableContractError(taskId, error, { reuseExisting: true });
+    }
+    return super.claim(taskId);
   }
 
   async submit(taskId, result) {
