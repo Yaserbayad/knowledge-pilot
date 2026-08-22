@@ -45,8 +45,12 @@ function readingDocumentResultContract() {
   };
 }
 
+function taskUsesReadingDocument(task) {
+  return BILINGUAL_TASK_TYPES.has(task?.type) && task?.payload?.readingDocumentContract === 'v1';
+}
+
 function addBilingualContract(context) {
-  if (!BILINGUAL_TASK_TYPES.has(context?.task?.type)) return context;
+  if (!taskUsesReadingDocument(context?.task)) return context;
   return {
     ...context,
     readingDocumentContract: READING_DOCUMENT_CONTRACT,
@@ -59,13 +63,20 @@ function addBilingualContract(context) {
 }
 
 export class BusinessActionsService extends CoreBusinessActionsService {
+  async queue(type, userId, payload = {}, options = {}) {
+    const versionedPayload = this.config.readingDocumentContract === 'v1' && BILINGUAL_TASK_TYPES.has(type)
+      ? { ...payload, readingDocumentContract: 'v1' }
+      : payload;
+    return super.queue(type, userId, versionedPayload, options);
+  }
+
   getTask(taskId) {
     return addBilingualContract(super.getTask(taskId));
   }
 
   async submit(taskId, result) {
     const task = this.store.read((state) => state.businessTasks?.[taskId]);
-    if (this.config.readingDocumentContract === 'v1' && task && BILINGUAL_TASK_TYPES.has(task.type)) {
+    if (taskUsesReadingDocument(task)) {
       normalizeReadingDocument(result?.readingDocument, { required: true });
     }
     return super.submit(taskId, result);
