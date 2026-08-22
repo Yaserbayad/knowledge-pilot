@@ -45,7 +45,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   release-tag-v151:
-    if: github.event_name == 'push' && github.event.head_commit.message == 'ops: trigger immutable v1.5.1 tag'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'ops/create-v1.5.1-tag'
     permissions:
       contents: write
     runs-on: ubuntu-latest
