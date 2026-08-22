@@ -43,3 +43,47 @@ jobs:
         run: npm run check
       - name: Dependency audit
         run: npm audit --omit=dev --audit-level=high
+
+  release-identity-bump:
+    if: github.event_name == 'pull_request' && github.event.pull_request.number == 13 && github.event.pull_request.head.ref == 'fix/reading-document-retry-contract'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/reading-document-retry-contract
+          fetch-depth: 0
+      - name: Bump exact release identity once
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$(tr -d '[:space:]' < VERSION)"
+          if [[ "$current" == "1.5.1" ]]; then
+            echo "Already 1.5.1"
+            exit 0
+          fi
+          [[ "$current" == "1.5.0" ]] || { echo "Unexpected VERSION=$current" >&2; exit 1; }
+          printf '1.5.1\n' > VERSION
+          python3 - <<'PY'
+          from pathlib import Path
+          changes = [
+              ('package.json', '"version": "1.5.0"', '"version": "1.5.1"', 1),
+              ('src/version.js', "APP_VERSION = '1.5.0'", "APP_VERSION = '1.5.1'", 1),
+              ('public/sw.js', 'knowledge-pilot-shell-v1.5.0', 'knowledge-pilot-shell-v1.5.1', 1),
+              ('package-lock.json', '"version": "1.5.0"', '"version": "1.5.1"', 2),
+          ]
+          for filename, old, new, count in changes:
+              path = Path(filename)
+              text = path.read_text()
+              if text.count(old) < count:
+                  raise SystemExit(f'{filename}: expected at least {count} occurrence(s) of {old!r}')
+              path.write_text(text.replace(old, new, count))
+          PY
+          node tests/release-identity.test.js
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add VERSION package.json package-lock.json src/version.js public/sw.js
+          git commit -m "chore: bump release identity to 1.5.1"
+          git push origin HEAD:fix/reading-document-retry-contract
