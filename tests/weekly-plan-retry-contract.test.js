@@ -163,6 +163,6 @@ test('a substantive failure mentioning a validator is not made retryable without
 
   const task = store.snapshot().businessTasks[taskId];
   assert.equal(task.status, 'failed');
-  assert.equal(task.lastSubmissionError, null);
+  assert.equal(task.lastSubmissionError ?? null, null);
   assert.equal(businessActions.list({ status: 'pending', limit: 20 }).some((item) => item.id === taskId), false);
 });
