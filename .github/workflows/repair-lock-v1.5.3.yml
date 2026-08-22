@@ -1,0 +1,50 @@
+name: Temporary repair v1.5.3 lockfile diff
+
+on:
+  push:
+    branches:
+      - fix/weekly-plan-retry-loop
+    paths:
+      - .github/workflows/repair-lock-v1.5.3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/weekly-plan-retry-loop
+          fetch-depth: 0
+      - name: Restore base formatting and bump only release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git show origin/main:package-lock.json > package-lock.json
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('package-lock.json')
+          s = p.read_text()
+          old = '"version": "1.5.2"'
+          new = '"version": "1.5.3"'
+          if s.count(old) < 2:
+              raise SystemExit('expected at least two 1.5.2 version entries')
+          s = s.replace(old, new, 2)
+          p.write_text(s)
+          PY
+          node -e "const l=require('./package-lock.json');if(l.version!=='1.5.3'||l.packages[''].version!=='1.5.3')process.exit(1)"
+          test "$(git diff --numstat origin/main -- package-lock.json)" = $'2\t2\tpackage-lock.json'
+          git diff --check origin/main -- package-lock.json
+      - name: Commit minimal lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package-lock.json
+          git commit -m 'release: keep v1.5.3 lockfile diff minimal'
+          git push origin HEAD:fix/weekly-plan-retry-loop
