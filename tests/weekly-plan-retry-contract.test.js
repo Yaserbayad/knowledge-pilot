@@ -130,3 +130,25 @@ test('a retryable weekly-plan validation rejection cannot be converted into perm
   assert.equal(task.status, 'pending');
   assert.equal(task.lastSubmissionError?.retryable, true);
 });
+
+test('a legacy failed weekly-plan validator rejection is relisted and reclaimable', async () => {
+  const { store, businessActions, taskId } = await fixture();
+
+  await assert.rejects(
+    businessActions.submit(taskId, semanticallyPrimaryButNonCanonicalPlan()),
+    /At least two of three proposals must advance the primary subject/
+  );
+
+  await store.transaction((state) => {
+    const task = state.businessTasks[taskId];
+    task.status = 'failed';
+    task.error = 'The validator did not recognize at least two proposals as advancing the primary subject.';
+    task.updatedAt = new Date().toISOString();
+  });
+
+  const pending = businessActions.list({ status: 'pending', limit: 20 });
+  assert.ok(pending.some((task) => task.id === taskId));
+
+  const claimed = await businessActions.claim(taskId);
+  assert.equal(claimed.status, 'claimed');
+});
