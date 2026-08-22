@@ -135,7 +135,8 @@ async function makeFixture() {
   await fs.writeFile(path.join(live, 'VERSION'), '1.4.2\n');
   await fs.writeFile(path.join(live, 'src', 'index.js'), 'old release\n');
   await fs.writeFile(path.join(live, 'stale-release-file.txt'), 'must disappear\n');
-  await fs.writeFile(path.join(live, 'data', 'state.json'), '{"preserve":true}\n');
+  await fs.writeFile(path.join(live, 'data', 'state.json'), '{"preserve":true}\n', { mode: 0o600 });
+  await fs.chmod(path.join(live, 'data'), 0o700);
   await fs.writeFile(path.join(live, '.well-known', 'acme.txt'), 'server-owned\n');
 
   await fs.mkdir(path.join(sourceRepo, 'src'), { recursive: true });
@@ -159,11 +160,16 @@ async function makeFixture() {
   assert.equal(run('git', ['tag', 'v1.4.3'], { cwd: sourceRepo }).status, 0);
   assert.equal(run('git', ['clone', sourceRepo, deployRepo], { cwd: root }).status, 0);
 
+  await writeExecutable(path.join(bin, 'node'), `#!/usr/bin/env bash\nexec "${process.execPath}" "$@"\n`);
+  await writeExecutable(path.join(bin, 'npm'), '#!/usr/bin/env bash\nprintf "npm %s\\n" "$*" >> "$KP_TEST_ROOT/commands.log"\nif [ -n "${KP_TEST_NPM_FAIL_MATCH:-}" ] && [[ "$*" == *"$KP_TEST_NPM_FAIL_MATCH"* ]]; then exit 42; fi\nexit 0\n');
+
   const pid = '4242';
   async function markRunning(version = '1.4.2') {
     await fs.mkdir(path.join(proc, pid), { recursive: true });
     try { await fs.unlink(path.join(proc, pid, 'cwd')); } catch {}
+    try { await fs.unlink(path.join(proc, pid, 'exe')); } catch {}
     await fs.symlink(live, path.join(proc, pid, 'cwd'));
+    await fs.symlink(path.join(bin, 'node'), path.join(proc, pid, 'exe'));
     await fs.writeFile(path.join(proc, pid, 'cmdline'), Buffer.from('/usr/bin/node\0src/index.js\0'));
     await fs.writeFile(path.join(proc, pid, 'status'), 'Name:\tnode\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n');
     await fs.writeFile(path.join(state, 'running'), `${pid}\n`);
@@ -173,9 +179,8 @@ async function makeFixture() {
   await markRunning();
   await writeExecutable(path.join(scriptDir, 'knowledgepilot.sh'), `#!/usr/bin/env bash\ncd "${live}"\nnohup node src/index.js >/dev/null 2>&1 &\n`);
 
-  await writeExecutable(path.join(bin, 'npm'), '#!/usr/bin/env bash\nprintf "npm %s\\n" "$*" >> "$KP_TEST_ROOT/commands.log"\nif [ -n "${KP_TEST_NPM_FAIL_MATCH:-}" ] && [[ "$*" == *"$KP_TEST_NPM_FAIL_MATCH"* ]]; then exit 42; fi\nexit 0\n');
   await writeExecutable(path.join(bin, 'ss'), '#!/usr/bin/env bash\nif [ -f "$KP_TEST_ROOT/runtime/running" ]; then pid=$(cat "$KP_TEST_ROOT/runtime/running"); printf "LISTEN 0 511 127.0.0.1:3100 0.0.0.0:* users:((\\\"node\\\",pid=%s,fd=20))\\n" "$pid"; fi\n');
-  await writeExecutable(path.join(bin, 'runuser'), `#!/usr/bin/env bash\nset -e\nif [ "$1" = "-u" ] && [ "$3" = "--" ] && [ "$4" = "test" ]; then exit 0; fi\nif [ "$1" = "-u" ] && [ "$3" = "--" ] && [ "$4" = "bash" ]; then\n  pid=4242\n  mkdir -p "$KP_TEST_ROOT/proc/$pid"\n  rm -f "$KP_TEST_ROOT/proc/$pid/cwd"\n  ln -s "$KP_TEST_ROOT/live" "$KP_TEST_ROOT/proc/$pid/cwd"\n  printf '/usr/bin/node\\0src/index.js\\0' > "$KP_TEST_ROOT/proc/$pid/cmdline"\n  printf 'Name:\\tnode\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\n' > "$KP_TEST_ROOT/proc/$pid/status"\n  printf '%s\\n' "$pid" > "$KP_TEST_ROOT/runtime/running"\n  cat "$KP_TEST_ROOT/live/VERSION" > "$KP_TEST_ROOT/runtime/version"\n  printf '%s\\n' "$pid" > "$KP_TEST_ROOT/aapanel/pids/knowledgepilot.pid"\n  exit 0\nfi\nexit 1\n`);
+  await writeExecutable(path.join(bin, 'runuser'), `#!/usr/bin/env bash\nset -e\nif [ "$1" = "-u" ] && [ "$3" = "--" ] && [ "$4" = "test" ]; then exit 0; fi\nif [ "$1" = "-u" ] && [ "$3" = "--" ] && [ "$4" = "bash" ]; then\n  pid=4242\n  mkdir -p "$KP_TEST_ROOT/proc/$pid"\n  rm -f "$KP_TEST_ROOT/proc/$pid/cwd" "$KP_TEST_ROOT/proc/$pid/exe"\n  ln -s "$KP_TEST_ROOT/live" "$KP_TEST_ROOT/proc/$pid/cwd"\n  ln -s "$KP_TEST_ROOT/bin/node" "$KP_TEST_ROOT/proc/$pid/exe"\n  printf '/usr/bin/node\\0src/index.js\\0' > "$KP_TEST_ROOT/proc/$pid/cmdline"\n  printf 'Name:\\tnode\\nUid:\\t1000\\t1000\\t1000\\t1000\\nGid:\\t1000\\t1000\\t1000\\t1000\\n' > "$KP_TEST_ROOT/proc/$pid/status"\n  printf '%s\\n' "$pid" > "$KP_TEST_ROOT/runtime/running"\n  cat "$KP_TEST_ROOT/live/VERSION" > "$KP_TEST_ROOT/runtime/version"\n  printf '%s\\n' "$pid" > "$KP_TEST_ROOT/aapanel/pids/knowledgepilot.pid"\n  exit 0\nfi\nexit 1\n`);
   await writeExecutable(path.join(bin, 'curl'), `#!/usr/bin/env bash\nset -e\nurl="\${@: -1}"\nversion=$(cat "$KP_TEST_ROOT/live/VERSION")\nif [[ "$url" == https://* ]] && [ "\${KP_TEST_FAIL_EXTERNAL_ON_VERSION:-}" = "$version" ]; then exit 22; fi\ncase "$url" in\n  */gpt-action/openapi.json) printf '{"info":{"version":"%s"}}\\n' "$version" ;;\n  *) printf '{"ok":true,"version":"%s"}\\n' "$version" ;;\nesac\n`);
 
   return { root, live, stage, rollback, deployRepo, bin, sha };
@@ -203,6 +208,8 @@ test('disposable simulation performs a generic cutover while preserving runtime-
   assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /SUPER-SECRET-SENTINEL|ANOTHER-SECRET-SENTINEL/);
   assert.equal(await fs.readFile(path.join(live, '.env'), 'utf8'), 'APP_SECRET=SUPER-SECRET-SENTINEL\nGPT_ACTION_API_KEY=ANOTHER-SECRET-SENTINEL\nAPP_BASE_URL=https://example.invalid\n');
   assert.equal(await fs.readFile(path.join(live, 'data', 'state.json'), 'utf8'), '{"preserve":true}\n');
+  assert.equal((await fs.stat(path.join(live, 'data'))).mode & 0o777, 0o700);
+  assert.equal((await fs.stat(path.join(live, 'data', 'state.json'))).mode & 0o777, 0o600);
   assert.equal(await fs.readFile(path.join(live, '.well-known', 'acme.txt'), 'utf8'), 'server-owned\n');
   await assert.rejects(fs.access(path.join(live, 'stale-release-file.txt')));
   assert.equal(await fs.readFile(path.join(live, 'new-release-file.txt'), 'utf8'), 'new\n');
@@ -227,6 +234,8 @@ test('post-cutover simulation failure automatically restores and verifies the pr
   assert.equal((await fs.readFile(path.join(live, 'VERSION'), 'utf8')).trim(), '1.4.2');
   assert.equal(await fs.readFile(path.join(live, 'src', 'index.js'), 'utf8'), 'old release\n');
   assert.equal(await fs.readFile(path.join(live, 'data', 'state.json'), 'utf8'), '{"preserve":true}\n');
+  assert.equal((await fs.stat(path.join(live, 'data'))).mode & 0o777, 0o700);
+  assert.equal((await fs.stat(path.join(live, 'data', 'state.json'))).mode & 0o777, 0o600);
   assert.equal(await fs.readFile(path.join(live, '.well-known', 'acme.txt'), 'utf8'), 'server-owned\n');
   assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /SUPER-SECRET-SENTINEL|ANOTHER-SECRET-SENTINEL/);
 });
