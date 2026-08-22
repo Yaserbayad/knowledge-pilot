@@ -96,6 +96,41 @@ test('reported ReadingDocument schema mismatch remains retryable for a book sess
   assert.equal(state.businessTasks.task_1.status, 'pending');
 });
 
+test('a v1 task terminally failed by the 1.5.0 schema bug is discoverable and repaired when claimed', async () => {
+  const { service, state } = serviceFor('book_session');
+  state.businessTasks.task_1.status = 'failed';
+  state.businessTasks.task_1.claimedAt = '2026-08-22T12:58:00.000Z';
+  state.businessTasks.task_1.error = 'Submission-schema mismatch for the required bilingual ReadingDocument v1';
+
+  const pending = service.list({ status: 'pending', limit: 20 });
+  const recoveredSummary = pending.find((task) => task.id === 'task_1');
+  assert.ok(recoveredSummary, 'recoverable v1 integration failure must be discoverable as pending');
+  assert.equal(recoveredSummary.status, 'pending');
+
+  const context = service.getTask('task_1');
+  assert.equal(context.task.status, 'pending');
+  assert.equal(context.retryingPriorIntegrationFailure, true);
+
+  const claimed = await service.claim('task_1');
+  assert.equal(claimed.status, 'claimed');
+  assert.ok(claimed.claimedAt);
+  assert.equal(claimed.lastSubmissionError?.code, 'CLIENT_REPORTED_CONTRACT_ERROR');
+  assert.equal(claimed.lastSubmissionError?.retryable, true);
+  assert.equal(state.businessTasks.task_1.status, 'claimed');
+});
+
+test('a genuine failed v1 content task remains failed and is not auto-recovered', async () => {
+  const { service, state } = serviceFor('book_session');
+  state.businessTasks.task_1.status = 'failed';
+  state.businessTasks.task_1.error = 'Reliable completion is impossible because the owned source text is unavailable';
+
+  assert.equal(service.list({ status: 'pending', limit: 20 }).some((task) => task.id === 'task_1'), false);
+  const context = service.getTask('task_1');
+  assert.equal(context.task.status, 'failed');
+  assert.equal(context.retryingPriorIntegrationFailure, undefined);
+  await assert.rejects(service.claim('task_1'), /cannot be claimed from status failed/i);
+});
+
 test('new lesson tasks are marked v1 while an existing pre-upgrade task remains on its legacy contract', async () => {
   const fresh = serviceFor('lesson');
   delete fresh.state.businessTasks.task_1;
