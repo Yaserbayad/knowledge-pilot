@@ -1,6 +1,6 @@
 function initReadingShellAccessibility() {
   const root = document.getElementById('reading-shell-root');
-  if (!root) return;
+  if (!root) return false;
 
   root.removeAttribute('aria-live');
   const topbar = document.querySelector('.topbar');
@@ -55,6 +55,9 @@ function initReadingShellAccessibility() {
   window.addEventListener('hashchange', () => queueMicrotask(sync));
   window.addEventListener('pageshow', sync);
   sync();
+  return true;
 }
 
-initReadingShellAccessibility();
+if (!initReadingShellAccessibility()) {
+  document.addEventListener('DOMContentLoaded', initReadingShellAccessibility, { once: true });
+}
