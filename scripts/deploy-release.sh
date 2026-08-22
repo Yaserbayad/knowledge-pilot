@@ -598,11 +598,16 @@ main() {
   RELEASE_TAG="$1"
   EXPECTED_SHA="$2"
   configure_paths || return 1
-  trap on_exit EXIT
 
   mkdir -p "$(dirname "$LOCK_FILE")"
   exec 9>"$LOCK_FILE"
-  flock -n 9 || { FAILURE_REASON="another deployment is active"; return 1; }
+  if ! flock -n 9; then
+    printf 'RESULT=FAIL\n'
+    printf 'FAILED_PHASE=LOCK\n'
+    printf 'ERROR=another deployment is active\n'
+    return 1
+  fi
+  trap on_exit EXIT
 
   phase PREFLIGHT
   preflight || fail "production preflight failed"
