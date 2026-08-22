@@ -21,38 +21,33 @@ sudo deploy-knowledge-pilot vX.Y.Z <EXPECTED_40_CHARACTER_COMMIT_SHA>
 
 7. Accept the deployment only when the command reports `RESULT=PASS`; otherwise follow its failure/rollback result.
 
-The permanent command performs the complete safe lifecycle: exclusive lock, actual-process preflight, read-only Git release verification, clean `git archive` staging, full application and Workspace Agent verification/audits, rollback snapshot, graceful aaPanel cutover, clean release-file replacement, explicit startup as `www`, actual runtime verification, authenticated local smoke, server integration, external HTTPS smoke, and automatic verified rollback after a post-cutover failure.
+The permanent command performs the complete safe lifecycle: exclusive lock, actual-process and healthy-baseline preflight, exact aaPanel Node-toolchain capture, read-only Git release verification, clean `git archive` staging, full application and Workspace Agent verification/audits, rollback snapshot, graceful aaPanel cutover, clean release-file replacement, explicit startup as `www`, actual runtime verification, authenticated local smoke, server integration, external HTTPS smoke, and automatic verified rollback after a post-cutover failure.
 
-The command preserves exactly `.env`, `data/`, and server-owned `.well-known/` when present. It does not carry stale release source, old `automation/`, `node_modules/`, `.git/`, or obsolete release files into the new release.
+Before staged application verification can pass, the release's `scripts/deploy-release.sh` must be byte-for-byte identical to the installed permanent engine. If deployment-engine source changed, the ordinary release fails safely before live mutation and the reviewed engine must be deliberately reinstalled first.
+
+The command preserves exactly `.env`, `data/`, and server-owned `.well-known/` when present. `data/` is treated as runtime-owned state: deployment preserves its existing ownership and permission metadata as well as its contents. The command does not carry stale release source, old `automation/`, `node_modules/`, `.git/`, or obsolete release files into the new release.
 
 Never deploy from `main`, `latest`, a feature branch, a working directory, or an unverified tag. Never start a second process manager because a shell-level PM2 view is empty.
 
-## One-time deployer bootstrap
+## One-time deployer installation
 
-The permanent engine is repository-owned at `scripts/deploy-release.sh` and installed as `/usr/local/sbin/deploy-knowledge-pilot` by `scripts/install-deployer.sh`.
+The permanent engine is repository-owned at `scripts/deploy-release.sh` and installed as `/usr/local/sbin/deploy-knowledge-pilot` by the repository-owned `scripts/install-deployer.sh`.
 
-After the engine change is merged to `main`, use the exact merged commit as `<ENGINE_SOURCE_SHA>`. The current live release does not contain this new installer yet, so bootstrap it directly from the existing read-only deployment checkout rather than from `/www/wwwroot/knowledgepilot`:
+After an engine change is reviewed and merged to `main`:
+
+1. Record the exact merged commit as `<ENGINE_SOURCE_SHA>`.
+2. Obtain `scripts/install-deployer.sh` from **that exact commit** and transfer that file to the server without editing it.
+3. Run:
 
 ```bash
-ENGINE_SOURCE_SHA='<ENGINE_SOURCE_SHA>'
-sudo bash -c '
-set -Eeuo pipefail
-repo=/opt/knowledgepilot-deploy
-sha="$1"
-git -C "$repo" fetch --prune origin
-test "$(git -C "$repo" cat-file -t "$sha" 2>/dev/null)" = commit
-git -C "$repo" merge-base --is-ancestor "$sha" refs/remotes/origin/main
-tmp="$(mktemp)"
-trap '\''rm -f "$tmp"'\'' EXIT
-git -C "$repo" show "${sha}:scripts/install-deployer.sh" > "$tmp"
-bash -n "$tmp"
-bash "$tmp" "$sha"
-' knowledge-pilot-bootstrap "$ENGINE_SOURCE_SHA"
+sudo bash install-deployer.sh <ENGINE_SOURCE_SHA>
 ```
 
-The bootstrap does not update the deployment checkout working tree and uses only the existing repository-specific read-only GitHub access. The installer independently re-verifies the source commit, extracts the engine from that exact commit, syntax-checks/self-tests it, installs it atomically as root-owned mode `0755`, and verifies the installed hash and self-test.
+The installer fails closed unless its own bytes match `scripts/install-deployer.sh` at the supplied exact `main` commit. It then uses only the existing repository-specific read-only GitHub access, re-fetches authoritative `origin/main`, verifies the source commit, extracts `scripts/deploy-release.sh` from that exact commit, syntax-checks and self-tests it, installs it atomically as `/usr/local/sbin/deploy-knowledge-pilot` with `root:root` mode `0755`, verifies the installed hash and permissions, and reruns the installed self-test.
 
-Application releases do not update the running deployment engine midway through deployment. A deliberate one-time reinstall is required only when the deployment architecture or the engine itself materially changes. See `docs/AAPANEL_DEPLOYMENT.md` for that boundary and rollback semantics.
+No extra bootstrap wrapper is required. The installer does not deploy, stop, restart, or replace the live Knowledge Pilot application.
+
+Application releases do not update the running deployment engine midway through deployment. A deliberate reinstall is required only when the deployment architecture or the engine itself materially changes. See `docs/AAPANEL_DEPLOYMENT.md` for that boundary and rollback semantics.
 
 ## Preparing an already-staged release manually
 
@@ -75,6 +70,8 @@ npm run check
 npm audit --omit=dev --audit-level=high
 npm ci --omit=dev --ignore-scripts
 ```
+
+For automated production deployment, the permanent engine runs these checks with the exact Node/npm toolchain captured from the currently serving aaPanel process; the manual commands above are diagnostic/manual preparation examples only.
 
 If any staging command fails, do not touch the live process.
 

@@ -16,6 +16,7 @@ CUTOVER_STARTED=0
 ROLLBACK_READY=0
 ROLLBACK_IN_PROGRESS=0
 AUTOMATION_PAUSED=0
+TIMER_STATE_CAPTURED=0
 TIMER_WAS_ACTIVE="inactive"
 TIMER_WAS_ENABLED="disabled"
 AAPANEL_PID_FILE=""
@@ -25,6 +26,9 @@ RELEASE_TAG=""
 EXPECTED_SHA=""
 RELEASE_VERSION=""
 ROLLBACK_VERSION=""
+RUNTIME_NODE_BINARY=""
+RUNTIME_NODE_DIR=""
+RUNTIME_NPM_BINARY=""
 TEST_MODE=0
 
 validate_release_args() {
@@ -88,13 +92,14 @@ configure_paths() {
 
 require_commands() {
   local command
-  for command in bash flock git tar rsync stat ss runuser node npm curl awk sed grep readlink find chown chmod df du seq sort cut basename head install mktemp dirname tr id sleep kill; do
+  for command in bash flock git tar rsync stat ss runuser curl awk sed grep readlink find chown chmod df du seq sort cut basename head install mktemp dirname tr id sleep kill sha256sum; do
     command -v "$command" >/dev/null 2>&1 || { printf 'Missing required command: %s\n' "$command" >&2; return 1; }
   done
+  if (( TEST_MODE == 0 )); then
+    command -v nginx >/dev/null 2>&1 || { printf 'Missing required command: nginx\n' >&2; return 1; }
+  fi
   if [[ -d "${LIVE:-}/automation/workspace-agent" ]]; then
-    for command in systemctl nginx; do
-      command -v "$command" >/dev/null 2>&1 || { printf 'Missing required command: %s\n' "$command" >&2; return 1; }
-    done
+    command -v systemctl >/dev/null 2>&1 || { printf 'Missing required command: systemctl\n' >&2; return 1; }
   fi
 }
 
@@ -128,6 +133,15 @@ wait_for_port_clear() {
   return 1
 }
 
+wait_for_process_exit() {
+  local pid="$1" i
+  for i in $(seq 1 60); do
+    [[ ! -d "$PROC_ROOT/$pid" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
 wait_for_listener() {
   local i
   for i in $(seq 1 30); do
@@ -135,6 +149,17 @@ wait_for_listener() {
     sleep 1
   done
   return 1
+}
+
+runtime_node() {
+  local binary="${RUNTIME_NODE_BINARY:-}"
+  [[ -n "$binary" ]] || binary="$(command -v node 2>/dev/null)" || return 1
+  "$binary" "$@"
+}
+
+runtime_npm() {
+  [[ -n "$RUNTIME_NPM_BINARY" && -n "$RUNTIME_NODE_DIR" ]] || return 1
+  PATH="$RUNTIME_NODE_DIR:$PATH" "$RUNTIME_NPM_BINARY" "$@"
 }
 
 verify_process_identity() {
@@ -156,6 +181,41 @@ verify_process_identity() {
   gid="$(awk '/^Gid:/ {print $2; exit}' "$process_root/status")"
   [[ "$uid" == "$RUNTIME_UID" ]] || return 1
   [[ "$gid" == "$RUNTIME_GID" ]] || return 1
+
+  if [[ -n "$RUNTIME_NODE_BINARY" ]]; then
+    local process_node
+    process_node="$(readlink -f "$process_root/exe")" || return 1
+    [[ "$process_node" == "$RUNTIME_NODE_BINARY" ]] || return 1
+  fi
+}
+
+capture_runtime_toolchain() {
+  local pid="$1" process_root="$PROC_ROOT/$pid" node_binary node_dir npm_binary major
+  node_binary="$(readlink -f "$process_root/exe")" || return 1
+  [[ -x "$node_binary" && "${node_binary##*/}" == "node" ]] || return 1
+  node_dir="$(dirname "$node_binary")"
+  npm_binary="$node_dir/npm"
+  [[ -x "$npm_binary" ]] || return 1
+  major="$("$node_binary" -p 'process.versions.node.split(`.`)[0]')" || return 1
+  [[ "$major" =~ ^[0-9]+$ ]] || return 1
+  (( major >= 22 )) || return 1
+  PATH="$node_dir:$PATH" "$npm_binary" --version >/dev/null || return 1
+  RUNTIME_NODE_BINARY="$node_binary"
+  RUNTIME_NODE_DIR="$node_dir"
+  RUNTIME_NPM_BINARY="$npm_binary"
+}
+
+live_cwd_process_pids() {
+  local process_root pid cwd
+  shopt -s nullglob
+  for process_root in "$PROC_ROOT"/[0-9]*; do
+    [[ -d "$process_root" ]] || continue
+    cwd="$(readlink -f "$process_root/cwd" 2>/dev/null || true)"
+    [[ "$cwd" == "$LIVE" ]] || continue
+    pid="${process_root##*/}"
+    [[ "$pid" =~ ^[0-9]+$ ]] && printf '%s\n' "$pid"
+  done
+  shopt -u nullglob
 }
 
 locate_aapanel_project() {
@@ -202,9 +262,16 @@ verify_start_script_runtime_writes() {
 }
 
 verify_current_runtime() {
-  local pid
+  local pid cwd_pids cwd_count
   pid="$(get_listener_pid)" || return 1
   verify_process_identity "$pid" || return 1
+  if [[ -z "$RUNTIME_NODE_BINARY" ]]; then
+    capture_runtime_toolchain "$pid" || return 1
+  fi
+  verify_process_identity "$pid" || return 1
+  cwd_pids="$(live_cwd_process_pids)"
+  cwd_count="$(printf '%s\n' "$cwd_pids" | sed '/^$/d' | grep -c '.' || true)"
+  [[ "$cwd_count" == "1" && "$cwd_pids" == "$pid" ]] || return 1
   locate_aapanel_project "$pid" || return 1
   CURRENT_PID="$pid"
 }
@@ -247,7 +314,7 @@ verify_deploy_key_sidecar_if_available() {
 preflight() {
   (( TEST_MODE == 1 )) || [[ "$EUID" == "0" ]] || return 1
   require_commands || return 1
-  [[ -d "$LIVE" && -f "$LIVE/.env" && -d "$LIVE/data" ]] || return 1
+  [[ -d "$LIVE" && -f "$LIVE/.env" && -d "$LIVE/data" && -f "$LIVE/VERSION" ]] || return 1
   local mode
   mode="$(stat -c '%a' "$LIVE/.env")" || return 1
   is_safe_env_mode "$mode" || return 1
@@ -260,18 +327,19 @@ preflight() {
   verify_disk_space || return 1
   [[ -d "$DEPLOY_REPO/.git" ]] || return 1
   verify_deploy_repo_origin || return 1
+  verify_current_baseline || return 1
 }
 
 resolve_release() {
   git -C "$DEPLOY_REPO" fetch --prune --prune-tags --tags origin >/dev/null || return 1
+  git -C "$DEPLOY_REPO" fetch --prune origin +refs/heads/main:refs/remotes/origin/main >/dev/null || return 1
   verify_deploy_key_sidecar_if_available || return 1
+  git -C "$DEPLOY_REPO" rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1 || return 1
   local actual_sha
   actual_sha="$(git -C "$DEPLOY_REPO" rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}" 2>/dev/null)" || return 1
   [[ "$actual_sha" == "$EXPECTED_SHA" ]] || return 1
   [[ "$(git -C "$DEPLOY_REPO" cat-file -t "$EXPECTED_SHA" 2>/dev/null)" == "commit" ]] || return 1
-  if git -C "$DEPLOY_REPO" rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
-    git -C "$DEPLOY_REPO" merge-base --is-ancestor "$EXPECTED_SHA" refs/remotes/origin/main || return 1
-  fi
+  git -C "$DEPLOY_REPO" merge-base --is-ancestor "$EXPECTED_SHA" refs/remotes/origin/main || return 1
   RELEASE_VERSION="${RELEASE_TAG#v}"
 }
 
@@ -279,17 +347,27 @@ workspace_agent_topology_matches() {
   [[ "${1:-}" == "${2:-}" ]]
 }
 
+installed_engine_matches_stage() {
+  local installed_path installed_hash staged_hash
+  installed_path="$(readlink -f "${BASH_SOURCE[0]}")" || return 1
+  [[ -f "$installed_path" && -f "$STAGE/scripts/deploy-release.sh" ]] || return 1
+  installed_hash="$(sha256sum "$installed_path" | awk '{print $1}')" || return 1
+  staged_hash="$(sha256sum "$STAGE/scripts/deploy-release.sh" | awk '{print $1}')" || return 1
+  [[ "$installed_hash" == "$staged_hash" ]]
+}
+
 verify_stage_identity() {
   [[ -f "$STAGE/VERSION" && -f "$STAGE/package.json" && -f "$STAGE/src/index.js" ]] || return 1
   [[ "$(tr -d '[:space:]' < "$STAGE/VERSION")" == "$RELEASE_VERSION" ]] || return 1
   local package_version
-  package_version="$(node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.version||""))' "$STAGE/package.json")" || return 1
+  package_version="$(runtime_node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.version||""))' "$STAGE/package.json")" || return 1
   [[ "$package_version" == "$RELEASE_VERSION" ]] || return 1
   local live_workspace=0 stage_workspace=0
   [[ -d "$LIVE/automation/workspace-agent" ]] && live_workspace=1
   [[ -d "$STAGE/automation/workspace-agent" ]] && stage_workspace=1
   workspace_agent_topology_matches "$live_workspace" "$stage_workspace" || return 1
   grep -Fq "ENGINE_COMPATIBILITY=\"$ENGINE_COMPATIBILITY\"" "$STAGE/scripts/deploy-release.sh" || return 1
+  installed_engine_matches_stage || return 1
 }
 
 prepare_stage() {
@@ -303,17 +381,17 @@ prepare_stage() {
 
   (
     cd "$STAGE"
-    DATA_DIR=./data WHATSAPP_AUTH_DIR=./data/whatsapp-auth bash scripts/install-aapanel.sh "$STAGE"
+    PATH="$RUNTIME_NODE_DIR:$PATH" DATA_DIR=./data WHATSAPP_AUTH_DIR=./data/whatsapp-auth bash scripts/install-aapanel.sh "$STAGE"
   ) || return 1
 
   if [[ -d "$STAGE/automation/workspace-agent" ]]; then
     [[ -f "$STAGE/automation/workspace-agent/package.json" && -f "$STAGE/automation/workspace-agent/package-lock.json" ]] || return 1
     (
       cd "$STAGE/automation/workspace-agent"
-      npm ci --ignore-scripts
-      npm run check
-      npm audit --omit=dev --audit-level=high
-      npm ci --omit=dev --ignore-scripts
+      runtime_npm ci --ignore-scripts
+      runtime_npm run check
+      runtime_npm audit --omit=dev --audit-level=high
+      runtime_npm ci --omit=dev --ignore-scripts
     ) || return 1
   fi
 }
@@ -340,6 +418,7 @@ capture_workspace_timer_state() {
   TIMER_WAS_ACTIVE="$(systemctl is-active "$WORKSPACE_TIMER" 2>/dev/null || true)"
   [[ -n "$TIMER_WAS_ENABLED" ]] || TIMER_WAS_ENABLED="disabled"
   [[ -n "$TIMER_WAS_ACTIVE" ]] || TIMER_WAS_ACTIVE="inactive"
+  TIMER_STATE_CAPTURED=1
 }
 
 pause_workspace_timer_if_active() {
@@ -355,6 +434,7 @@ pause_workspace_timer_if_active() {
 
 restore_workspace_timer_state() {
   (( TEST_MODE == 1 )) && { AUTOMATION_PAUSED=0; return 0; }
+  (( TIMER_STATE_CAPTURED == 1 )) || return 0
   if (( AUTOMATION_PAUSED == 1 )); then
     systemctl start "$WORKSPACE_TIMER" || return 1
     systemctl is-active --quiet "$WORKSPACE_TIMER" || return 1
@@ -369,27 +449,36 @@ restore_workspace_timer_state() {
   fi
 }
 
-graceful_stop_application() {
-  local pid="$1"
+stop_verified_process() {
+  local pid="$1" require_listener="${2:-1}"
   verify_process_identity "$pid" || return 1
-  [[ "$(get_listener_pid)" == "$pid" ]] || return 1
+  if [[ "$require_listener" == "1" ]]; then
+    [[ "$(get_listener_pid)" == "$pid" ]] || return 1
+  fi
   if (( TEST_MODE == 1 )); then
     rm -f "$KP_TEST_ROOT/runtime/running"
     rm -rf "$PROC_ROOT/$pid"
   else
     kill -TERM "$pid" || return 1
   fi
+  wait_for_process_exit "$pid" || return 1
   wait_for_port_clear || return 1
+}
+
+graceful_stop_application() {
+  local pid="$1"
+  stop_verified_process "$pid" 1
+  wait_for_process_exit "$pid" || return 1
 }
 
 apply_live_permissions() {
   if (( TEST_MODE == 0 )); then
     chown "$RUNTIME_USER:$RUNTIME_GROUP" "$LIVE" || return 1
-    find "$LIVE" -mindepth 1 -maxdepth 1 ! -name '.well-known' -exec chown -R "$RUNTIME_USER:$RUNTIME_GROUP" -- {} + || return 1
+    find "$LIVE" -mindepth 1 -maxdepth 1 \
+      ! -name '.well-known' ! -name '.env' ! -name 'data' \
+      -exec chown -R "$RUNTIME_USER:$RUNTIME_GROUP" -- {} + || return 1
   fi
   chmod 600 "$LIVE/.env" || return 1
-  find "$LIVE/data" -type d -exec chmod 750 {} + || return 1
-  find "$LIVE/data" -type f -exec chmod 640 {} + || return 1
 }
 
 cutover_files() {
@@ -403,7 +492,11 @@ cutover_files() {
 
 start_application_as_runtime_user() {
   local start_rc=0
-  runuser -u "$RUNTIME_USER" -- bash "$AAPANEL_START_SCRIPT" || start_rc=$?
+  if (( TEST_MODE == 1 )); then
+    runuser -u "$RUNTIME_USER" -- bash "$AAPANEL_START_SCRIPT" || start_rc=$?
+  else
+    runuser -u "$RUNTIME_USER" -- env "PATH=$RUNTIME_NODE_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" bash "$AAPANEL_START_SCRIPT" || start_rc=$?
+  fi
   if ! wait_for_listener; then
     if (( start_rc != 0 )); then return "$start_rc"; fi
     return 1
@@ -417,7 +510,7 @@ start_application_as_runtime_user() {
 
 verify_health_json() {
   local expected="$1" payload="$2"
-  EXPECTED_VERSION="$expected" node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.ok!==true||j.version!==process.env.EXPECTED_VERSION)process.exit(1)})' \
+  EXPECTED_VERSION="$expected" runtime_node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const j=JSON.parse(s);if(j.ok!==true||j.version!==process.env.EXPECTED_VERSION)process.exit(1)})' \
     >/dev/null 2>&1 <<<"$payload"
 }
 
@@ -429,12 +522,12 @@ local_health_smoke() {
 
 authenticated_local_smoke() {
   if (( TEST_MODE == 1 )); then
-    node --input-type=module >/dev/null <<'NODE'
+    runtime_node --input-type=module >/dev/null <<'NODE'
 await Promise.resolve();
 NODE
     return 0
   fi
-  KP_ENV_FILE="$LIVE/.env" KP_SMOKE_URL="http://127.0.0.1:${PORT}/api/gpt/health" node --input-type=module >/dev/null <<'NODE'
+  KP_ENV_FILE="$LIVE/.env" KP_SMOKE_URL="http://127.0.0.1:${PORT}/api/gpt/health" runtime_node --input-type=module >/dev/null <<'NODE'
 import fs from 'node:fs/promises';
 const raw = await fs.readFile(process.env.KP_ENV_FILE, 'utf8');
 const values = new Map();
@@ -462,7 +555,7 @@ NODE
 
 load_env_value() {
   local key="$1"
-  KP_ENV_FILE="$LIVE/.env" KP_ENV_KEY="$key" node --input-type=module <<'NODE'
+  KP_ENV_FILE="$LIVE/.env" KP_ENV_KEY="$key" runtime_node --input-type=module <<'NODE'
 import fs from 'node:fs/promises';
 const raw = await fs.readFile(process.env.KP_ENV_FILE, 'utf8');
 for (const rawLine of raw.split(/\r?\n/)) {
@@ -488,17 +581,29 @@ external_smoke() {
   health="$(curl -fsS --max-time 20 "$base/health")" || return 1
   verify_health_json "$expected" "$health" || return 1
   schema="$(curl -fsS --max-time 20 "$base/gpt-action/openapi.json")" || return 1
-  EXPECTED_VERSION="$expected" node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const j=JSON.parse(s);if(j?.info?.version!==process.env.EXPECTED_VERSION)process.exit(1)})' \
+  EXPECTED_VERSION="$expected" runtime_node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const j=JSON.parse(s);if(j?.info?.version!==process.env.EXPECTED_VERSION)process.exit(1)})' \
     >/dev/null 2>&1 <<<"$schema"
 }
 
 verify_running_release() {
-  local expected="$1" pid
-  pid="$(get_listener_pid)" || { printf 'RUNTIME_CHECK=LISTENER_FAIL\n' >&2; return 1; }
-  verify_process_identity "$pid" || { printf 'RUNTIME_CHECK=PROCESS_IDENTITY_FAIL\n' >&2; return 1; }
-  local actual_version; actual_version="$(tr -d '[:space:]' < "$LIVE/VERSION")"; [[ "$actual_version" == "$expected" ]] || { printf 'RUNTIME_CHECK=VERSION_FAIL actual=%s expected=%s\n' "$actual_version" "$expected" >&2; return 1; }
+  local expected="$1"
+  verify_current_runtime || { printf 'RUNTIME_CHECK=PROCESS_IDENTITY_FAIL\n' >&2; return 1; }
+  local actual_version
+  actual_version="$(tr -d '[:space:]' < "$LIVE/VERSION")"
+  [[ "$actual_version" == "$expected" ]] || { printf 'RUNTIME_CHECK=VERSION_FAIL actual=%s expected=%s\n' "$actual_version" "$expected" >&2; return 1; }
   local_health_smoke "$expected" || { printf 'RUNTIME_CHECK=LOCAL_HEALTH_FAIL\n' >&2; return 1; }
-  CURRENT_PID="$pid"
+}
+
+verify_current_baseline() {
+  local current_version
+  current_version="$(tr -d '[:space:]' < "$LIVE/VERSION")" || return 1
+  [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  verify_running_release "$current_version" || return 1
+  authenticated_local_smoke || return 1
+  if (( TEST_MODE == 0 )); then
+    nginx -t >/dev/null 2>&1 || return 1
+  fi
+  external_smoke "$current_version" || return 1
 }
 
 configure_workspace_agent_server() {
@@ -506,7 +611,7 @@ configure_workspace_agent_server() {
   (( TEST_MODE == 1 )) && return 0
   (
     cd "$LIVE/automation/workspace-agent"
-    node deploy/configure-server.mjs
+    runtime_node deploy/configure-server.mjs
   ) || return 1
   systemctl daemon-reload || return 1
   nginx -t || return 1
@@ -526,10 +631,21 @@ restore_release_owned_files() {
 perform_rollback() {
   ROLLBACK_IN_PROGRESS=1
   set +e
-  local ok=1 pid
-  pid="$(get_listener_pid 2>/dev/null)"
-  if [[ -n "$pid" ]]; then
-    graceful_stop_application "$pid" || ok=0
+  local ok=1 pid snapshot cwd_pids cwd_count
+  snapshot="$(listener_snapshot | sed '/^[[:space:]]*$/d')"
+  if [[ -n "$snapshot" ]]; then
+    pid="$(get_listener_pid 2>/dev/null)" || ok=0
+    if (( ok == 1 )); then graceful_stop_application "$pid" || ok=0; fi
+  else
+    cwd_pids="$(live_cwd_process_pids)"
+    cwd_count="$(printf '%s\n' "$cwd_pids" | sed '/^$/d' | grep -c '.' || true)"
+    if (( cwd_count > 1 )); then
+      ok=0
+    elif (( cwd_count == 1 )); then
+      pid="$cwd_pids"
+      verify_process_identity "$pid" || ok=0
+      if (( ok == 1 )); then stop_verified_process "$pid" 0 || ok=0; fi
+    fi
   fi
   if (( ok == 1 )); then restore_release_owned_files || ok=0; fi
   if (( ok == 1 )); then start_application_as_runtime_user || ok=0; fi
@@ -626,7 +742,7 @@ main() {
   phase LIVE_STOP
   verify_current_runtime || fail "runtime changed before stop"
   # Sending TERM is already a material production availability mutation. From
-  # this point onward every failure is rollback-eligible, even if port clear
+  # this point onward every failure is rollback-eligible, even if shutdown
   # confirmation itself times out.
   CUTOVER_STARTED=1
   graceful_stop_application "$CURRENT_PID" || fail "graceful live stop failed"
